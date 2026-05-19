@@ -1,0 +1,14 @@
+node_modules
+
+# Env secrets – chừa lại .env.example
+.env
+.env.development
+.env.staging
+.env.production
+.env.local
+.env.test
+
+*.log
+coverage
+.git
+.gitignore
