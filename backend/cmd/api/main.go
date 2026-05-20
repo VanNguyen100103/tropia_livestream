@@ -26,7 +26,6 @@ import (
 	"github.com/tropia/backend/internal/events"
 	"github.com/tropia/backend/internal/httpx"
 	"github.com/tropia/backend/internal/live"
-	"github.com/tropia/backend/internal/notify"
 	"github.com/tropia/backend/internal/payment"
 	"github.com/tropia/backend/internal/shops"
 	"github.com/tropia/backend/internal/srs"
@@ -114,16 +113,9 @@ func main() {
 		RedirectURL: os.Getenv("ZALOPAY_REDIRECT_URL"),
 	})
 
-	emailer := notify.NewEmail(notify.EmailConfig{
-		Host:     getEnvOr("EMAIL_HOST", "smtp.gmail.com"),
-		Port:     587,
-		Username: os.Getenv("EMAIL_USERNAME"),
-		Password: os.Getenv("EMAIL_PASSWORD"),
-		FromName: getEnvOr("EMAIL_FROM_NAME", "Tropia"),
-	})
+	// Email sending lives in cmd/worker, not here.
 
 	deepseek := ai.NewDeepSeek(os.Getenv("DEEPSEEK_API_KEY"))
-	_ = deepseek // wire when adding AI endpoints
 
 	// JWT
 	jwtSvc := auth.NewService(cfg.JWTAccessSecret, cfg.JWTRefreshSecret, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
@@ -138,15 +130,16 @@ func main() {
 	orderRepo := commerce.NewOrderRepository(db)
 	cpnRepo := commerce.NewCouponRepository(db)
 
-	// Services
-	authSvc := auth.NewAuthService(authRepo, jwtSvc, rds, cc)
+	// Services — wired with the event bus so writes publish to Redis Streams
+	// for the worker binary to pick up.
+	authSvc := auth.NewAuthService(authRepo, jwtSvc, rds, cc).WithEvents(bus)
 	liveSvc := live.NewService(nil, live.ServiceConfig{
 		RTMPHost: cfg.SRSRtmpHost,
 		HLSHost:  cfg.SRSHlsHost,
 		WHIPHost: cfg.SRSWhipHost,
 		SRTPort:  10080,
 	})
-	orderSvc := commerce.NewOrderService(db, orderRepo, cartRepo, cpnRepo, cc)
+	orderSvc := commerce.NewOrderService(db, orderRepo, cartRepo, cpnRepo, cc).WithEvents(bus)
 
 	// HTTP
 	router := gin.New()
@@ -248,19 +241,9 @@ func main() {
 		uploadH.Register(router.Group("/api/upload"), authMw, sellerMw)
 	}
 
-	// Background workers
-	go func() {
-		bus.Subscribe(ctx, "user.registered", "notify-welcome", "worker-1", func(ctx context.Context, data []byte) error {
-			// TODO unmarshal and send welcome
-			return nil
-		})
-	}()
-	go func() {
-		bus.Subscribe(ctx, "auth.email_otp", "notify-otp", "worker-1", func(ctx context.Context, data []byte) error {
-			_ = emailer
-			return nil
-		})
-	}()
+	// Background workers used to run inline here as goroutines. They now
+	// live in `cmd/worker` so they can be deployed and scaled independently.
+	// Run with: `go run ./cmd/worker` (or `make worker`).
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

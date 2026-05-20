@@ -30,15 +30,37 @@ const (
 	passwordResetBytes   = 32
 )
 
+// EventPublisher is the subset of events.EventBus that AuthService needs.
+// Keeping it as an interface avoids an import cycle and makes the service
+// trivial to test.
+type EventPublisher interface {
+	Publish(ctx context.Context, eventType string, payload any) error
+}
+
+// noopPublisher is used when no EventBus is wired in (e.g. unit tests).
+type noopPublisher struct{}
+
+func (noopPublisher) Publish(context.Context, string, any) error { return nil }
+
 type AuthService struct {
-	repo  *Repository
-	jwt   *Service
-	rds   *redis.Client
-	cache *cache.Cache
+	repo   *Repository
+	jwt    *Service
+	rds    *redis.Client
+	cache  *cache.Cache
+	events EventPublisher
 }
 
 func NewAuthService(repo *Repository, jwt *Service, rds *redis.Client, c *cache.Cache) *AuthService {
-	return &AuthService{repo: repo, jwt: jwt, rds: rds, cache: c}
+	return &AuthService{repo: repo, jwt: jwt, rds: rds, cache: c, events: noopPublisher{}}
+}
+
+// WithEvents wires an EventPublisher so background workers can act on
+// register / OTP / password-reset events.
+func (s *AuthService) WithEvents(p EventPublisher) *AuthService {
+	if p != nil {
+		s.events = p
+	}
+	return s
 }
 
 // ---------- Helpers ----------
@@ -190,6 +212,14 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Register
 		return nil, httpx.NewInternal("store otp", err)
 	}
 
+	// Publish to worker → sends OTP email
+	_ = s.events.Publish(ctx, "auth.email_otp", map[string]any{
+		"user_id": user.ID.String(),
+		"email":   user.Email,
+		"name":    user.Name,
+		"otp":     otp,
+	})
+
 	return &RegisterResult{User: user, OTP: otp}, nil
 }
 
@@ -213,6 +243,14 @@ func (s *AuthService) VerifyEmailOTP(ctx context.Context, email, otp string) err
 	if err := s.repo.MarkEmailVerified(ctx, user.ID); err != nil {
 		return httpx.NewInternal("mark verified", err)
 	}
+
+	// Publish welcome email (mirrors Node.js: welcome goes out AFTER OTP verify,
+	// not after registration).
+	_ = s.events.Publish(ctx, "user.registered", map[string]any{
+		"user_id": user.ID.String(),
+		"email":   user.Email,
+		"name":    user.Name,
+	})
 	return nil
 }
 
@@ -226,6 +264,12 @@ func (s *AuthService) ResendOTP(ctx context.Context, email string) (string, erro
 	if err := s.rds.Set(ctx, "email_otp:"+user.ID.String(), otp, otpTTL).Err(); err != nil {
 		return "", httpx.NewInternal("store otp", err)
 	}
+	_ = s.events.Publish(ctx, "auth.email_otp", map[string]any{
+		"user_id": user.ID.String(),
+		"email":   user.Email,
+		"name":    user.Name,
+		"otp":     otp,
+	})
 	return otp, nil
 }
 
@@ -316,6 +360,12 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) (string,
 	if err := s.repo.SetPasswordReset(ctx, user.ID, hash, expires); err != nil {
 		return "", httpx.NewInternal("set reset token", err)
 	}
+	_ = s.events.Publish(ctx, "auth.password_reset", map[string]any{
+		"user_id":     user.ID.String(),
+		"email":       user.Email,
+		"name":        user.Name,
+		"reset_token": rawToken, // worker builds reset URL from this
+	})
 	return rawToken, nil
 }
 

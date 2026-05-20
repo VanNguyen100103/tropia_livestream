@@ -15,8 +15,9 @@ help:
 	@echo ""
 	@echo "Run / build:"
 	@echo "  make run                  — go run ./cmd/api"
+	@echo "  make worker               — go run ./cmd/worker"
 	@echo "  make build                — build ./api binary"
-	@echo "  make build-all            — build all 3 binaries (api, migrate, seed)"
+	@echo "  make build-all            — build all 4 binaries (api, worker, migrate, seed)"
 	@echo "  make tidy                 — go mod tidy"
 	@echo "  make seed                 — populate DB with deterministic test data"
 	@echo ""
@@ -33,15 +34,19 @@ help:
 
 # ── Run / build ──────────────────────────────────────────────────────────────
 
-.PHONY: run build build-all tidy seed
+.PHONY: run worker build build-all tidy seed
 run:
 	go run ./cmd/api
+
+worker:
+	go run ./cmd/worker
 
 build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o api ./cmd/api
 
 build-all:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o api      ./cmd/api
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o worker   ./cmd/worker
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o migrate  ./cmd/migrate
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o seed     ./cmd/seed
 

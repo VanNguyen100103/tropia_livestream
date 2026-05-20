@@ -1,0 +1,44 @@
+# Background worker — consumes Redis Streams events published by the api.
+# Same image as the api Deployment, just runs `worker` binary instead.
+#
+# Scale separately from the api via `kubectl scale deployment worker --replicas=N`.
+# Each replica registers under consumer name `worker-N` so Redis Streams
+# distributes events round-robin within each consumer group.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: tropia
+  labels:
+    app: worker
+spec:
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: tropia/backend:dev   # same image as api Deployment
+          imagePullPolicy: IfNotPresent
+          command: ["/app/worker"]    # override the api entrypoint
+          envFrom:
+            - configMapRef: { name: backend-config }
+            - secretRef:    { name: tropia-secrets }
+          env:
+            - name: DATABASE_URL
+              value: postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/tropia?sslmode=disable
+          resources:
+            requests: { cpu: 50m,  memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          # No HTTP server → liveness probe by running `/app/worker --healthcheck`
+          # is overkill for now. Add later if worker grows complex.

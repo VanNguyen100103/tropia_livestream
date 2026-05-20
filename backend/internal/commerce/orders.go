@@ -139,16 +139,33 @@ func scanOrder(row interface{ Scan(...any) error }, o *Order) error {
 // Order Service - place live order + checkout cart
 // ============================================================================
 
+// EventPublisher mirrors events.EventBus for testability.
+type EventPublisher interface {
+	Publish(ctx context.Context, eventType string, payload any) error
+}
+
+type noopPublisher struct{}
+
+func (noopPublisher) Publish(context.Context, string, any) error { return nil }
+
 type OrderService struct {
-	pool     *pgxpool.Pool
-	orderRepo *OrderRepository
-	cartRepo *CartRepository
+	pool       *pgxpool.Pool
+	orderRepo  *OrderRepository
+	cartRepo   *CartRepository
 	couponRepo *CouponRepository
-	cache    *cache.Cache
+	cache      *cache.Cache
+	events     EventPublisher
 }
 
 func NewOrderService(pool *pgxpool.Pool, oRepo *OrderRepository, cRepo *CartRepository, cpnRepo *CouponRepository, cc *cache.Cache) *OrderService {
-	return &OrderService{pool: pool, orderRepo: oRepo, cartRepo: cRepo, couponRepo: cpnRepo, cache: cc}
+	return &OrderService{pool: pool, orderRepo: oRepo, cartRepo: cRepo, couponRepo: cpnRepo, cache: cc, events: noopPublisher{}}
+}
+
+func (s *OrderService) WithEvents(p EventPublisher) *OrderService {
+	if p != nil {
+		s.events = p
+	}
+	return s
 }
 
 type PlaceOrderInput struct {
@@ -217,6 +234,17 @@ func (s *OrderService) PlaceLiveOrder(ctx context.Context, in PlaceOrderInput) (
 	if couponID != nil {
 		_ = s.couponRepo.RecordUsage(ctx, *couponID, in.BuyerID, order.ID)
 	}
+
+	// Worker → sends order confirmation email
+	_ = s.events.Publish(ctx, "order.created", map[string]any{
+		"order_id":        order.ID.String(),
+		"buyer_id":        order.BuyerID.String(),
+		"buyer_name":      in.BuyerName,
+		"product_name":    productName,
+		"quantity":        in.Quantity,
+		"total_price":     totalPrice,
+		"discount_amount": discount,
+	})
 
 	return order, nil
 }
@@ -287,6 +315,18 @@ func (s *OrderService) CheckoutCart(ctx context.Context, in CheckoutCartInput) (
 
 	// Remove checked-out items from cart
 	_ = s.cartRepo.RemoveSelected(ctx, in.BuyerID)
+
+	// Worker → sends checkout confirmation email
+	_ = s.events.Publish(ctx, "order.created", map[string]any{
+		"order_id":        order.ID.String(),
+		"buyer_id":        order.BuyerID.String(),
+		"buyer_name":      in.BuyerName,
+		"product_name":    productName,
+		"quantity":        totalQty,
+		"total_price":     grandTotal,
+		"discount_amount": discount,
+		"session_title":   "Tropia Store",
+	})
 
 	return order, nil
 }
