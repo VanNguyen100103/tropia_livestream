@@ -1,30 +1,21 @@
-# ── Stage 1: install dependencies ────────────────────────────────────────────
-FROM node:22-alpine AS deps
+# Multi-stage build for Tropia Go backend
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci --omit=dev --ignore-scripts \
-    && npm cache clean --force
+# Cache deps layer
+COPY go.mod go.sum ./
+RUN go mod download
 
-# ── Stage 2: runtime image ────────────────────────────────────────────────────
-FROM node:22-alpine AS runner
+# Build
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/api ./cmd/api
 
-# Tạo group + user riêng, không chạy root
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-
+# Runtime
+FROM alpine:3.20
+RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
-
-# Copy deps từ stage 1 (không có npm cache)
-COPY --from=deps --chown=appuser:appgroup /app/node_modules ./node_modules
-
-# Copy source
-COPY --chown=appuser:appgroup src ./src
-
-USER appuser
-
-ENV NODE_ENV=production
+COPY --from=builder /out/api /app/api
 EXPOSE 3000
-
-# Dùng exec form để nhận SIGTERM đúng cách (graceful shutdown)
-CMD ["node", "src/index.js"]
+ENV PORT=3000
+ENTRYPOINT ["/app/api"]
