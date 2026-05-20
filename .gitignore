@@ -72,3 +72,4 @@ k8s/secrets.yaml
 # but if anyone bind-mounts data here, ignore it.
 infra/data/
 infra/dvr/
+.commit_msg.tmp
