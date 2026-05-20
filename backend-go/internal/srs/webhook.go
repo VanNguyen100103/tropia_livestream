@@ -1,0 +1,131 @@
+package srs
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/tropia/backend-go/internal/live"
+)
+
+// SRS webhook handler
+// Reference: https://github.com/ossrs/srs/wiki/v4_EN_HTTPCallback
+//
+// SRS POSTs to these endpoints when events happen:
+// - on_publish:   stream started
+// - on_unpublish: stream ended
+// - on_play:      viewer connected
+// - on_stop:      viewer disconnected
+// - on_dvr:       recording file finished
+
+type Handler struct {
+	liveSvc *live.Service
+	repo    *live.Repository
+}
+
+func NewHandler(liveSvc *live.Service, repo *live.Repository) *Handler {
+	return &Handler{liveSvc: liveSvc, repo: repo}
+}
+
+func (h *Handler) Register(r *gin.RouterGroup) {
+	r.POST("/on_publish", h.onPublish)
+	r.POST("/on_unpublish", h.onUnpublish)
+	r.POST("/on_play", h.onPlay)
+	r.POST("/on_stop", h.onStop)
+	r.POST("/on_dvr", h.onDvr)
+}
+
+// SRS webhook payload
+// {
+//   "action": "on_publish",
+//   "client_id": "108",
+//   "ip": "127.0.0.1",
+//   "vhost": "__defaultVhost__",
+//   "app": "live",
+//   "stream": "tropia_abc123",     <-- this is our stream_key
+//   "param": "?token=xxx"
+// }
+type webhookPayload struct {
+	Action   string `json:"action"`
+	ClientID string `json:"client_id"`
+	IP       string `json:"ip"`
+	Vhost    string `json:"vhost"`
+	App      string `json:"app"`
+	Stream   string `json:"stream"`
+	Param    string `json:"param"`
+	File     string `json:"file,omitempty"` // for on_dvr
+	Duration int    `json:"duration,omitempty"`
+}
+
+// SRS expects HTTP 200 with body "0" to allow; non-zero to deny.
+func ok(c *gin.Context) {
+	c.String(http.StatusOK, "0")
+}
+
+func deny(c *gin.Context, code int) {
+	c.String(http.StatusOK, "%d", code)
+}
+
+func (h *Handler) onPublish(c *gin.Context) {
+	var p webhookPayload
+	if err := c.ShouldBindJSON(&p); err != nil {
+		deny(c, 1)
+		return
+	}
+
+	// Verify stream_key exists in DB
+	stream, err := h.repo.GetByStreamKey(c.Request.Context(), p.Stream)
+	if err != nil {
+		// Reject unknown stream keys
+		deny(c, 1)
+		return
+	}
+
+	// Mark stream as live
+	_ = h.repo.MarkLive(c.Request.Context(), p.Stream)
+	_ = stream
+
+	ok(c)
+}
+
+func (h *Handler) onUnpublish(c *gin.Context) {
+	var p webhookPayload
+	if err := c.ShouldBindJSON(&p); err != nil {
+		ok(c) // unpublish always succeeds
+		return
+	}
+	_ = h.repo.MarkEnded(c.Request.Context(), p.Stream)
+	ok(c)
+}
+
+func (h *Handler) onPlay(c *gin.Context) {
+	var p webhookPayload
+	if err := c.ShouldBindJSON(&p); err != nil {
+		ok(c)
+		return
+	}
+	_ = h.repo.IncrViewer(c.Request.Context(), p.Stream, +1)
+	ok(c)
+}
+
+func (h *Handler) onStop(c *gin.Context) {
+	var p webhookPayload
+	if err := c.ShouldBindJSON(&p); err != nil {
+		ok(c)
+		return
+	}
+	_ = h.repo.IncrViewer(c.Request.Context(), p.Stream, -1)
+	ok(c)
+}
+
+func (h *Handler) onDvr(c *gin.Context) {
+	var p webhookPayload
+	if err := c.ShouldBindJSON(&p); err != nil {
+		ok(c)
+		return
+	}
+	// TODO: trigger recording upload job to R2
+	// For now just log
+	_ = p
+	ok(c)
+}
