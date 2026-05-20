@@ -54,6 +54,49 @@ go run ./cmd/api
 Reads `backend/.env.development` (gitignored). Listens on `:3000`.
 Health: `curl http://localhost:3000/health`.
 
+### 2b. Database migrations
+
+Schema is managed by [golang-migrate](https://github.com/golang-migrate/migrate)
+in `backend/migrations/`. The Docker Compose Postgres also auto-runs
+`infra/postgres/init.sql` (a copy of migration 0001) on first volume init,
+so for local dev you usually don't need to run migrations manually.
+
+For Supabase / production / when you add migration 0002+:
+
+```bash
+cd backend
+# First time pointing at Supabase that already has the initial schema:
+.\scripts\migrate.ps1 force 1     # Windows
+make migrate-force ver=1          # Unix
+
+# Apply any pending migrations
+.\scripts\migrate.ps1 up          # Windows
+make migrate-up                   # Unix
+
+# Add a new schema change
+.\scripts\migrate.ps1 create add_phone_to_profiles
+# → edits 0002_add_phone_to_profiles.up.sql + .down.sql, then `migrate-up`
+```
+
+See `backend/migrations/README.md` for full workflow.
+
+### 2c. Seed test data
+
+After the schema is in place, populate the DB with deterministic
+fixtures (1 admin + 1 seller + 1 buyer + 1 shop + 3 categories + 2 products
++ 1 live session). Idempotent — safe to re-run.
+
+```bash
+cd backend
+.\scripts\seed.ps1                   # Windows
+make seed                            # Unix
+# or directly:
+go run ./cmd/seed
+```
+
+All seed accounts share password `Password123`. See `cmd/seed/main.go`
+for the full list of fixtures.
+
 ### 3. Start Flutter
 
 ```bash
