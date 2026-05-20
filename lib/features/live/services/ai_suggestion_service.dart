@@ -64,11 +64,11 @@ class AiSuggestionService {
   }) async {
     final dio = AuthService.instance.authorizedDio();
     final response = await dio.post(
-      '/api/live/$streamId/ai-suggestions',
+      '/api/live/streams/$streamId/ai-suggestions',
       data: {
-        'productName':    productName,
-        'category':       category,
-        'recentComments': recentComments.take(10).toList(),
+        'product_name':     productName,
+        'category':         category,
+        'recent_comments':  recentComments.take(10).toList(),
       },
     );
     final List list = response.data['suggestions'] as List;

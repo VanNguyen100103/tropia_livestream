@@ -187,6 +187,10 @@ func main() {
 	liveH := live.NewHandler(liveSvc, sessRepo, cc)
 	liveH.Register(router.Group("/api/live"), authMw, sellerMw)
 
+	// AI endpoints (DeepSeek-backed) on top of live sessions
+	aiH := live.NewAIHandler(deepseek, sessRepo)
+	aiH.Register(router.Group("/api/live"), authMw, sellerMw)
+
 	// SRS webhooks
 	srsH := srs.NewHandler(sessRepo)
 	srsH.Register(router.Group("/api/srs"))

@@ -184,20 +184,72 @@ class LiveRepository {
     return res.data as Map<String, dynamic>;
   }
 
-  // ── Deferred (Phase 18 — not wired yet on the Go backend) ──────────────────
+  // ── AI (Phase 18 — DeepSeek-backed on the Go side) ─────────────────────────
 
+  /// Returns up to 3 short Vietnamese viewer questions for the host to
+  /// optionally broadcast as starter chat. Falls back to `null` on failure.
+  Future<List<String>?> fetchAiSuggestions({
+    required String sessionId,
+    String? productName,
+    String? category,
+    List<String> recentComments = const [],
+  }) async {
+    try {
+      final res = await _dio.post(
+        '/api/live/streams/$sessionId/ai-suggestions',
+        data: {
+          if (productName != null) 'product_name': productName,
+          if (category != null) 'category': category,
+          if (recentComments.isNotEmpty) 'recent_comments': recentComments,
+        },
+      );
+      final list = (res.data as Map<String, dynamic>)['suggestions'] as List?;
+      return list?.cast<String>();
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchAiSuggestions failed', e, null);
+      return null;
+    }
+  }
+
+  /// Auto-reply for one viewer question. Returns the reply string or null.
   Future<String?> fetchAiReply({
     required String sessionId,
     required String question,
-    required String productName,
-    required String category,
+    String? productName,
+    String? category,
   }) async {
-    AppLogger.logInfo(_tag, 'fetchAiReply: endpoint not wired in Go backend yet');
-    return null;
+    try {
+      final res = await _dio.post(
+        '/api/live/streams/$sessionId/ai-reply',
+        data: {
+          'question': question,
+          if (productName != null) 'product_name': productName,
+          if (category != null) 'category': category,
+        },
+      );
+      return (res.data as Map<String, dynamic>)['reply'] as String?;
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchAiReply failed', e, null);
+      return null;
+    }
   }
 
+  /// Sentiment + summary + 4 tips for the host. Returns
+  /// `{sentiment, summary, tips: [...]}` or null on failure.
+  Future<Map<String, dynamic>?> analyzeLive(String sessionId) async {
+    try {
+      final res = await _dio.post('/api/live/streams/$sessionId/analyze');
+      return res.data as Map<String, dynamic>;
+    } catch (e) {
+      AppLogger.logError(_tag, 'analyzeLive failed', e, null);
+      return null;
+    }
+  }
+
+  // ── Coupons (still not wired on the Go backend) ────────────────────────────
+
   Future<List<Map<String, dynamic>>> fetchLiveCoupons(String sessionId) async {
-    AppLogger.logInfo(_tag, 'fetchLiveCoupons: endpoint not wired in Go backend yet');
+    AppLogger.logInfo(_tag, 'fetchLiveCoupons: endpoint not wired on backend yet');
     return const [];
   }
 
@@ -205,11 +257,6 @@ class LiveRepository {
     required String sessionId,
     required String couponCode,
   }) async {
-    AppLogger.logInfo(_tag, 'broadcastCoupon: endpoint not wired in Go backend yet');
-  }
-
-  Future<Map<String, dynamic>?> analyzeLive(String sessionId) async {
-    AppLogger.logInfo(_tag, 'analyzeLive: endpoint not wired in Go backend yet');
-    return null;
+    AppLogger.logInfo(_tag, 'broadcastCoupon: endpoint not wired on backend yet');
   }
 }
