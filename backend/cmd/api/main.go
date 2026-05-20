@@ -104,6 +104,15 @@ func main() {
 		URL:        getEnvOr("VNP_URL", "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html"),
 		ReturnURL:  os.Getenv("VNP_RETURN_URL"),
 	})
+	zalopay := payment.NewZaloPay(payment.ZaloPayConfig{
+		AppID:       os.Getenv("ZALOPAY_APP_ID"),
+		Key1:        os.Getenv("ZALOPAY_KEY1"),
+		Key2:        os.Getenv("ZALOPAY_KEY2"),
+		APICreate:   getEnvOr("ZALOPAY_API_CREATE", "https://sb-openapi.zalopay.vn/v2/create"),
+		APIQuery:    getEnvOr("ZALOPAY_API_QUERY", "https://sb-openapi.zalopay.vn/v2/query"),
+		CallbackURL: os.Getenv("ZALOPAY_CALLBACK_URL"),
+		RedirectURL: os.Getenv("ZALOPAY_REDIRECT_URL"),
+	})
 
 	emailer := notify.NewEmail(notify.EmailConfig{
 		Host:     getEnvOr("EMAIL_HOST", "smtp.gmail.com"),
@@ -224,7 +233,7 @@ func main() {
 
 	// Payment
 	if r2 != nil || true {
-		paymentH := payment.NewHandler(orderRepo, momo, vnpay, clientURL)
+		paymentH := payment.NewHandler(orderRepo, momo, vnpay, zalopay, clientURL)
 		paymentH.Register(router.Group("/api/payment"), authMw)
 	}
 
