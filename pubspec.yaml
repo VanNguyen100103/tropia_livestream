@@ -37,8 +37,8 @@ dependencies:
   uuid: ^4.3.3
   logger: ^2.2.0
 
-  # Agora (Live streaming)
-  agora_rtc_engine: ^6.5.3
+  # LiveKit (Live streaming)
+  livekit_client: ^2.3.2
 
   # Media picker
   image_picker: ^1.1.2

@@ -2,7 +2,7 @@
 
 const express  = require('express');
 const { z }    = require('zod');
-const { RtcTokenBuilder, RtcRole } = require('agora-token');
+const { AccessToken, RoomServiceClient } = require('livekit-server-sdk');
 const supabase = require('../lib/supabase');
 const { authenticate } = require('../middleware/auth');
 const { NotFoundError, ValidationError } = require('../errors/AppError');
@@ -16,13 +16,13 @@ const tokenSchema = z.object({
   role:        z.enum(['publisher', 'subscriber']).default('subscriber'),
 });
 
-// POST /api/token/agora
-router.post('/agora', authenticate, async (req, res, next) => {
+// POST /api/token/livekit  (Flutter gọi endpoint này)
+router.post('/livekit', authenticate, async (req, res, next) => {
   try {
     const body = tokenSchema.parse(req.body);
     let { sessionId, channelName, uid, role } = body;
 
-    // RBAC: only sellers can request publisher tokens
+    // RBAC: chỉ seller/admin được publisher token
     if (role === 'publisher' && req.user.role !== 'seller' && req.user.role !== 'admin') {
       role = 'subscriber';
     }
@@ -39,16 +39,44 @@ router.post('/agora', authenticate, async (req, res, next) => {
 
     if (!channelName) return next(new ValidationError('channelName or sessionId required'));
 
-    const { appId, appCert } = config.agora;
-    if (!appId || !appCert) {
-      return res.status(500).json({ error: 'Agora credentials not configured' });
+    const { apiKey, apiSecret, host } = config.livekit;
+    if (!apiKey || !apiSecret || !host) {
+      return res.status(500).json({ error: 'LiveKit credentials not configured' });
     }
 
-    const agoraRole = role === 'publisher' ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
-    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
-    const token     = RtcTokenBuilder.buildTokenWithUid(appId, appCert, channelName, uid, agoraRole, expiresAt);
+    const identity = `${req.user.id}_${uid}`;
+    const ttl      = 3600; // 1 giờ
 
-    res.json({ token, appId, channel: channelName, uid, expiresIn: 3600 });
+    const at = new AccessToken(apiKey, apiSecret, {
+      identity,
+      ttl,
+    });
+
+    if (role === 'publisher') {
+      at.addGrant({
+        roomJoin:     true,
+        room:         channelName,
+        canPublish:   true,
+        canSubscribe: true,
+      });
+    } else {
+      at.addGrant({
+        roomJoin:     true,
+        room:         channelName,
+        canPublish:   false,
+        canSubscribe: true,
+      });
+    }
+
+    const token = await at.toJwt();
+
+    res.json({
+      token,
+      wsUrl:     host,
+      room:      channelName,
+      identity,
+      expiresIn: ttl,
+    });
   } catch (e) { next(e); }
 });
 

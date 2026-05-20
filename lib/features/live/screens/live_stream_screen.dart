@@ -44,7 +44,7 @@
 
 import 'dart:async';
 
-import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+import 'package:livekit_client/livekit_client.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -56,11 +56,11 @@ import 'package:tropia/features/cart/providers/cart_provider.dart';
 import 'package:tropia/features/coupon/data/coupon_repository.dart';
 import 'package:tropia/features/cart/screens/checkout_screen.dart';
 import 'package:tropia/features/live/data/live_repository.dart';
-import 'package:tropia/features/live/services/agora_service.dart';
+import 'package:tropia/features/live/services/livekit_service.dart';
 import 'package:tropia/core/utils/logger.dart';
 import 'package:tropia/features/live/models/live_stream_model.dart';
 import 'package:tropia/features/live/providers/live_provider.dart';
-import 'package:tropia/features/live/widgets/agora_web_viewer.dart';
+import 'package:tropia/features/live/widgets/livekit_web_viewer.dart';
 import 'package:tropia/features/live/widgets/live_actions_widget.dart';
 import 'package:tropia/features/live/widgets/live_ai_suggestion_widget.dart';
 import 'package:tropia/features/live/widgets/live_chat_widget.dart';
@@ -102,17 +102,13 @@ class _LiveStreamScreenState extends State<LiveStreamScreen>
   List<Map<String, dynamic>> _liveCoupons = [];
   int _currentCouponIndex = 0;
 
-  // ─── Agora (viewer) ─────────────────────────────────────────────────────────
-  RtcEngine? _engine;
-  int  _remoteUid  = 0;
-  bool _agoraReady = false;
-  // Lưu để renewal token
-  String? _agoraSessionId;
-  int     _agoraUid = 0;
-  // Web viewer token info (dùng cho AgoraWebViewer widget)
-  String? _webAppId;
-  String? _webToken;
-  String? _webChannel;
+  // ─── LiveKit (viewer) ───────────────────────────────────────────────────────
+  Room? _room;
+  VideoTrack? _remoteVideoTrack;
+  bool _liveKitReady = false;
+  // Web/Mobile dùng chung token info
+  String? _livekitWsUrl;
+  String? _livekitToken;
 
   @override
   void initState() {
@@ -124,7 +120,7 @@ class _LiveStreamScreenState extends State<LiveStreamScreen>
       provider.onCouponBroadcasted = _onCouponBroadcasted;
       await provider.openStream(widget.streamId);
       AppLogger.logInfo(_tag, 'Opened stream: ${widget.streamId}');
-      await _joinAgoraChannel();
+      await _joinLiveKitRoom();
       await _loadCoupons();
     });
   }
@@ -245,7 +241,7 @@ class _LiveStreamScreenState extends State<LiveStreamScreen>
 
   void _onHostEndedLive() {
     if (!mounted) return;
-    if (!kIsWeb) _engine?.leaveChannel();
+    if (_room != null) LiveKitService.disconnect(_room!);
 
     // Refresh danh sách — session đã ended sẽ tự biến mất khỏi tab Live
     context.read<LiveProvider>().refresh();
@@ -269,58 +265,55 @@ class _LiveStreamScreenState extends State<LiveStreamScreen>
     );
   }
 
-  Future<void> _joinAgoraChannel() async {
+  Future<void> _joinLiveKitRoom() async {
     final stream = context.read<LiveProvider>().currentStream;
     if (stream == null) return;
     try {
-      final tokenRes = await AgoraService.fetchTokenBySession(
+      final tokenRes = await LiveKitService.fetchTokenBySession(
         sessionId:   stream.id,
         isPublisher: false,
-        uid:         0,
       );
-      _agoraSessionId = stream.id;
-      _agoraUid       = tokenRes.uid;
+
+      // Lưu để web viewer dùng
+      if (mounted) {
+        setState(() {
+          _livekitWsUrl = tokenRes.wsUrl;
+          _livekitToken = tokenRes.token;
+        });
+      }
 
       if (kIsWeb) {
-        // Flutter Web: dùng Agora JS SDK qua AgoraWebViewer widget
-        if (mounted) {
-          setState(() {
-          _webAppId   = tokenRes.appId;
-          _webToken   = tokenRes.token;
-          _webChannel = tokenRes.channel;
-          _agoraReady = true; // show web viewer ngay
-        });
-        }
+        // Web: LiveKitWebViewer tự connect, chỉ cần set token info
+        if (mounted) setState(() => _liveKitReady = true);
         return;
       }
 
-      // Mobile: dùng agora_rtc_engine native
-      _engine = await AgoraService.createEngine(tokenRes.appId);
-
-      await AgoraService.joinAsViewer(
-        engine:   _engine!,
+      // Mobile: join room và lắng nghe track
+      _room = await LiveKitService.joinAsViewer(
         tokenRes: tokenRes,
-        onHostOnline: (uid) {
-          if (mounted) setState(() { _remoteUid = uid; _agoraReady = true; });
+        onHostTrackSubscribed: (participant, pub, track) {
+          if (track is VideoTrack && mounted) {
+            setState(() { _remoteVideoTrack = track; _liveKitReady = true; });
+          }
         },
-        onHostOffline: (uid) {
-          if (mounted) setState(() { _remoteUid = 0; _agoraReady = false; });
+        onHostTrackUnsubscribed: (participant, pub, track) {
+          if (track is VideoTrack && mounted) {
+            setState(() { _remoteVideoTrack = null; _liveKitReady = false; });
+          }
         },
-        onTokenExpiring: () => _renewViewerToken(),
       );
-    } catch (e, st) {
-      AppLogger.logError(_tag, 'Agora viewer join failed', e, st);
-    }
-  }
 
-  Future<void> _renewViewerToken() async {
-    if (_engine == null || _agoraSessionId == null) return;
-    await AgoraService.renewToken(
-      engine:      _engine!,
-      sessionId:   _agoraSessionId!,
-      isPublisher: false,
-      uid:         _agoraUid,
-    );
+      // Host đã publish trước khi viewer join
+      for (final p in _room!.remoteParticipants.values) {
+        for (final pub in p.videoTrackPublications) {
+          if (pub.subscribed && pub.track != null) {
+            if (mounted) setState(() { _remoteVideoTrack = pub.track as VideoTrack; _liveKitReady = true; });
+          }
+        }
+      }
+    } catch (e, st) {
+      AppLogger.logError(_tag, 'LiveKit viewer join failed', e, st);
+    }
   }
 
   void _sendComment(LiveProvider provider, LiveStream stream, String text) {
@@ -391,10 +384,7 @@ class _LiveStreamScreenState extends State<LiveStreamScreen>
     _commentFocus.dispose();
     _productScrollController.dispose();
     _voucherTimer?.cancel();
-    if (!kIsWeb) {
-      _engine?.leaveChannel();
-      _engine?.release();
-    }
+    if (_room != null) LiveKitService.disconnect(_room!);
     final provider = context.read<LiveProvider>();
     provider.onSessionEnded = null;
     provider.onCouponBroadcasted = null;
@@ -467,29 +457,21 @@ class _LiveStreamScreenState extends State<LiveStreamScreen>
   // 1. VIDEO BACKGROUND
   // ─────────────────────────────────────────────────────────────────────────
 
-  /// Video background: Agora remote stream if available, else gradient fallback.
+  /// Video background: LiveKit remote stream if available, else gradient fallback.
   Widget _buildVideoBackground(LiveStream stream) {
-    // Flutter Web: dùng Agora JS SDK
-    if (kIsWeb && _agoraReady && _webAppId != null) {
-      return AgoraWebViewer(
-        appId:   _webAppId!,
-        channel: _webChannel!,
-        token:   _webToken!,
-        uid:     _agoraUid,
+    // Flutter Web: LiveKitWebViewer tự manage connection
+    if (kIsWeb && _liveKitReady && _livekitWsUrl != null && _livekitToken != null) {
+      return LiveKitWebViewer(
+        wsUrl: _livekitWsUrl!,
+        token: _livekitToken!,
         onVideoReady:   () { if (mounted) setState(() {}); },
         onVideoStopped: () { if (mounted) setState(() {}); },
       );
     }
 
-    // Mobile: dùng native Agora SDK
-    if (!kIsWeb && _agoraReady && _remoteUid != 0 && _engine != null) {
-      return AgoraVideoView(
-        controller: VideoViewController.remote(
-          rtcEngine: _engine!,
-          canvas: VideoCanvas(uid: _remoteUid),
-          connection: RtcConnection(channelId: stream.id),
-        ),
-      );
+    // Mobile: render VideoTrack từ host
+    if (!kIsWeb && _liveKitReady && _remoteVideoTrack != null) {
+      return VideoTrackRenderer(_remoteVideoTrack!);
     }
 
     // Fallback: gradient + loading indicator

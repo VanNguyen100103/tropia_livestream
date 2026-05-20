@@ -1,10 +1,10 @@
 // =============================================================================
-// live_host_screen.dart – Agora RTC broadcaster + Supabase Realtime chat
+// live_host_screen.dart – LiveKit broadcaster + Supabase Realtime chat
 // =============================================================================
 
 import 'dart:async';
 
-import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+import 'package:livekit_client/livekit_client.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,7 +12,7 @@ import 'package:share_plus/share_plus.dart' show Share;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:tropia/core/constants/app_constants.dart';
-import 'package:tropia/features/live/services/agora_service.dart';
+import 'package:tropia/features/live/services/livekit_service.dart';
 import 'package:tropia/core/utils/logger.dart';
 import 'package:tropia/features/live/data/live_repository.dart';
 import 'package:tropia/features/live/models/live_stream_model.dart';
@@ -44,12 +44,12 @@ class LiveHostScreen extends StatefulWidget {
 class _LiveHostScreenState extends State<LiveHostScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
 
-  // ─── Agora ───────────────────────────────────────────────────────────────────
-  RtcEngine? _engine;
-  bool _agoraReady = false;
+  // ─── LiveKit ─────────────────────────────────────────────────────────────────
+  Room? _room;
+  LocalVideoTrack? _localVideoTrack;
+  bool _liveKitReady = false;
   bool _isCameraOn = true;
   bool _isMicOn = true;
-  int _localUid = 0;
   String? _startError;
 
   // ─── Stats from Supabase Realtime ────────────────────────────────────────────
@@ -88,7 +88,7 @@ class _LiveHostScreenState extends State<LiveHostScreen>
       if (mounted) setState(() => _elapsedSeconds++);
     });
 
-    // Agora + Supabase init after first frame (need context for provider)
+    // LiveKit + Supabase init after first frame (need context for provider)
     WidgetsBinding.instance.addPostFrameCallback((_) => _startLive());
   }
 
@@ -111,7 +111,7 @@ class _LiveHostScreenState extends State<LiveHostScreen>
     final provider = context.read<LiveProvider>();
 
     try {
-      // 1. Publish session lên Node.js → nhận Agora channel name
+      // 1. Publish session lên Node.js → nhận LiveKit room name
       debugPrint('>>> STEP 1: publishHostStream');
       final channelName = await provider.publishHostStream(
         title:        widget.title,
@@ -123,76 +123,43 @@ class _LiveHostScreenState extends State<LiveHostScreen>
       _sessionId = provider.hostSessionId;
       debugPrint('>>> STEP 1 OK: channel=$channelName');
 
-      // 2. Lấy token từ backend (appId cũng trả về, không hardcode)
+      // 2. Lấy token từ backend
       debugPrint('>>> STEP 2: fetchToken');
-      final tokenRes = await AgoraService.fetchToken(
+      final tokenRes = await LiveKitService.fetchToken(
         channelName: channelName,
         isPublisher: true,
-        uid:         0,
       );
-      _localUid = tokenRes.uid;
-      debugPrint('>>> STEP 2 OK: appId=${tokenRes.appId} uid=${tokenRes.uid}');
+      debugPrint('>>> STEP 2 OK: room=${tokenRes.room}');
 
-      // 3. Khởi tạo engine với appId từ server
-      debugPrint('>>> STEP 3: createEngine');
-      _engine = await AgoraService.createEngine(tokenRes.appId);
-      debugPrint('>>> STEP 3 OK');
-      debugPrint('>>> STEP 4: setClientRole');
-      await _engine!.setClientRole(role: ClientRoleType.clientRoleBroadcaster);
-      debugPrint('>>> STEP 4a: enableVideo');
-      await _engine!.enableVideo();
-      debugPrint('>>> STEP 4b: enableAudio');
-      await _engine!.enableAudio();
-      debugPrint('>>> STEP 4c: setVideoEncoderConfiguration');
-      await _engine!.setVideoEncoderConfiguration(const VideoEncoderConfiguration(
-        dimensions: VideoDimensions(width: 640, height: 480),
-        frameRate: 15,
-        bitrate: 500,
-        orientationMode: OrientationMode.orientationModeAdaptive,
-        degradationPreference: DegradationPreference.maintainFramerate,
-      ));
-
-      // Đăng ký event handler TRƯỚC khi startPreview/joinChannel
-      _engine!.registerEventHandler(RtcEngineEventHandler(
-        onJoinChannelSuccess: (conn, _) =>
-            AppLogger.logInfo(_tag, 'Host joined: ${conn.channelId}'),
-        onLocalVideoStateChanged: (VideoSourceType source, LocalVideoStreamState state, LocalVideoStreamReason reason) {
-          AppLogger.logInfo(_tag, 'LocalVideo state=$state reason=$reason');
-          if (state == LocalVideoStreamState.localVideoStreamStateCapturing ||
-              state == LocalVideoStreamState.localVideoStreamStateEncoding) {
-            if (mounted && !_agoraReady) setState(() => _agoraReady = true);
-          }
+      // 3. Join LiveKit room as host
+      debugPrint('>>> STEP 3: joinAsHost');
+      _room = await LiveKitService.joinAsHost(
+        tokenRes: tokenRes,
+        onViewerJoined: (p) {
+          if (mounted) setState(() => _viewers++);
         },
-        onUserJoined:  (_, uid, __) { if (mounted) setState(() => _viewers++); },
-        onUserOffline: (_, uid, __) { if (mounted) setState(() => _viewers = (_viewers - 1).clamp(0, 999999)); },
-        onTokenPrivilegeWillExpire: (_, token) => _renewHostToken(channelName),
-        onError: (err, msg) => AppLogger.logError(_tag, 'Agora error $err: $msg', null, null),
-      ));
+        onViewerLeft: (p) {
+          if (mounted) setState(() => _viewers = (_viewers - 1).clamp(0, 999999));
+        },
+      );
 
-      debugPrint('>>> STEP 4d: startPreview');
-      await _engine!.startPreview();
-      debugPrint('>>> STEP 4d OK: startPreview called');
+      // Lấy local video track để render preview
+      final videoTrack = _room!.localParticipant?.videoTrackPublications.firstOrNull?.track;
+      if (videoTrack is LocalVideoTrack) {
+        setState(() {
+          _localVideoTrack = videoTrack;
+          _liveKitReady = true;
+        });
+      }
 
-      // Fallback: nếu sau 3 giây camera chưa trigger event, vẫn hiển thị preview
+      // Fallback: nếu sau 3 giây vẫn chưa có track, vẫn hiển thị
       Future.delayed(const Duration(seconds: 3), () {
-        if (mounted && !_agoraReady) setState(() => _agoraReady = true);
+        if (mounted && !_liveKitReady) setState(() => _liveKitReady = true);
       });
 
-      _engine!.joinChannel(
-        token:     tokenRes.token,
-        channelId: tokenRes.channel,
-        uid:       tokenRes.uid,
-        options: const ChannelMediaOptions(
-          clientRoleType:         ClientRoleType.clientRoleBroadcaster,
-          channelProfile:         ChannelProfileType.channelProfileLiveBroadcasting,
-          publishCameraTrack:     true,
-          publishMicrophoneTrack: true,
-          autoSubscribeAudio:     false,
-          autoSubscribeVideo:     false,
-        ),
-      );
+      debugPrint('>>> STEP 3 OK');
 
-      // 4. Start polling chat + stats — dùng _sessionId đã gán ở trên
+      // 4. Start polling chat + stats
       _startPolling();
 
       AppLogger.logUserEvent(action: 'host_live_started', context: _tag,
@@ -201,16 +168,6 @@ class _LiveHostScreenState extends State<LiveHostScreen>
       AppLogger.logError(_tag, 'startLive failed', e, st);
       if (mounted) setState(() => _startError = e.toString());
     }
-  }
-
-  Future<void> _renewHostToken(String channelName) async {
-    if (_engine == null) return;
-    await AgoraService.renewToken(
-      engine:      _engine!,
-      sessionId:   _sessionId ?? channelName,
-      isPublisher: true,
-      uid:         _localUid,
-    );
   }
 
   // ─── Polling ──────────────────────────────────────────────────────────────────
@@ -271,9 +228,9 @@ class _LiveHostScreenState extends State<LiveHostScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
-      _engine?.muteLocalVideoStream(true);
+      _room?.localParticipant?.setCameraEnabled(false);
     } else if (state == AppLifecycleState.resumed) {
-      if (_isCameraOn) _engine?.muteLocalVideoStream(false);
+      if (_isCameraOn) _room?.localParticipant?.setCameraEnabled(true);
     }
   }
 
@@ -285,8 +242,7 @@ class _LiveHostScreenState extends State<LiveHostScreen>
     _statsPollTimer?.cancel();
     _pulseCtrl.dispose();
     _chatScroll.dispose();
-    _engine?.leaveChannel();
-    _engine?.release();
+    if (_room != null) LiveKitService.disconnect(_room!);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
   }
@@ -295,16 +251,23 @@ class _LiveHostScreenState extends State<LiveHostScreen>
 
   void _toggleCamera() {
     setState(() => _isCameraOn = !_isCameraOn);
-    _engine?.muteLocalVideoStream(!_isCameraOn);
+    _room?.localParticipant?.setCameraEnabled(_isCameraOn);
   }
 
   void _toggleMic() {
     setState(() => _isMicOn = !_isMicOn);
-    _engine?.muteLocalAudioStream(!_isMicOn);
+    _room?.localParticipant?.setMicrophoneEnabled(_isMicOn);
   }
 
   Future<void> _flipCamera() async {
-    await _engine?.switchCamera();
+    final pub = _room?.localParticipant?.videoTrackPublications.firstOrNull;
+    final track = pub?.track;
+    if (track is LocalVideoTrack) await track.setCameraPosition(
+      track.currentOptions is CameraCaptureOptions &&
+          (track.currentOptions as CameraCaptureOptions).cameraPosition == CameraPosition.front
+          ? CameraPosition.back
+          : CameraPosition.front,
+    );
   }
 
   // ─── Chat ─────────────────────────────────────────────────────────────────────
@@ -409,7 +372,7 @@ class _LiveHostScreenState extends State<LiveHostScreen>
           finalFollows  = (stats['follow_count']   as num?)?.toInt() ?? finalFollows;
         } catch (_) {}
       }
-      await _engine?.leaveChannel();
+      if (_room != null) await LiveKitService.disconnect(_room!);
       if (!mounted) return;
       nav.pushReplacement(MaterialPageRoute(
         builder: (_) => LiveEndScreen(
@@ -470,7 +433,7 @@ class _LiveHostScreenState extends State<LiveHostScreen>
   // ─── Video layer ──────────────────────────────────────────────────────────────
 
   Widget _buildVideoLayer() {
-    if (!_agoraReady || !_isCameraOn) {
+    if (!_liveKitReady || !_isCameraOn || _localVideoTrack == null) {
       return Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -494,7 +457,7 @@ class _LiveHostScreenState extends State<LiveHostScreen>
                   ),
                 ]),
               )
-            : !_agoraReady
+            : !_liveKitReady
                 ? const CircularProgressIndicator(color: Colors.white38)
                 : const Column(mainAxisSize: MainAxisSize.min, children: [
                     Icon(Icons.videocam_off, color: Colors.white24, size: 56),
@@ -505,12 +468,7 @@ class _LiveHostScreenState extends State<LiveHostScreen>
       );
     }
 
-    return AgoraVideoView(
-      controller: VideoViewController(
-        rtcEngine: _engine!,
-        canvas: const VideoCanvas(uid: 0), // 0 = local
-      ),
-    );
+    return VideoTrackRenderer(_localVideoTrack!);
   }
 
   // ─── Top bar ──────────────────────────────────────────────────────────────────

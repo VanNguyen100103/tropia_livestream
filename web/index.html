@@ -13,12 +13,8 @@
   <title>Tropia</title>
   <link rel="manifest" href="manifest.json">
 
-  <!-- Agora Web SDK -->
-  <script src="https://download.agora.io/sdk/release/AgoraRTC_N-4.22.0.js"></script>
-
   <style>
-    /* Agora platform view containers (created dynamically by Flutter's HtmlElementView) */
-    [id^="agora-flutter-container-"] video {
+    video {
       width: 100%;
       height: 100%;
       object-fit: cover;
@@ -26,98 +22,6 @@
   </style>
 </head>
 <body>
-  <script>
-    // ── Agora Web Bridge ────────────────────────────────────────────────────────
-    // Flutter Web gọi các hàm này qua dart:js
-
-    let _agoraClient = null;
-    let _remoteVideoTrack = null;
-    let _remoteAudioTrack = null;
-    let _activeContainerId = null;
-
-    // Called by Flutter's HtmlElementView factory to register which div to use
-    window.agoraSetContainer = function(containerId) {
-      _activeContainerId = containerId;
-      console.log('[Agora] Container set:', containerId);
-    };
-
-    function _getContainer() {
-      return _activeContainerId
-        ? document.getElementById(_activeContainerId)
-        : null;
-    }
-
-    window.agoraJoinViewer = async function(appId, channel, token, uid) {
-      try {
-        if (_agoraClient) {
-          await _agoraClient.leave();
-          _agoraClient = null;
-        }
-
-        _agoraClient = AgoraRTC.createClient({ mode: 'live', codec: 'vp8' });
-        _agoraClient.setClientRole('audience', { level: 1 }); // ultra-low latency
-
-        _agoraClient.on('user-published', async (user, mediaType) => {
-          await _agoraClient.subscribe(user, mediaType);
-          if (mediaType === 'video') {
-            _remoteVideoTrack = user.videoTrack;
-            const container = _getContainer();
-            if (container) {
-              container.innerHTML = '';
-              _remoteVideoTrack.play(container);
-              console.log('[Agora] Video playing, uid:', user.uid);
-            } else {
-              console.warn('[Agora] Container not found, playing into body fallback');
-              _remoteVideoTrack.play(document.body);
-            }
-          }
-          if (mediaType === 'audio') {
-            _remoteAudioTrack = user.audioTrack;
-            _remoteAudioTrack.play();
-          }
-        });
-
-        _agoraClient.on('user-unpublished', (user, mediaType) => {
-          if (mediaType === 'video') {
-            const container = _getContainer();
-            if (container) container.innerHTML = '';
-          }
-        });
-
-        _agoraClient.on('user-left', () => {
-          const container = _getContainer();
-          if (container) container.innerHTML = '';
-          console.log('[Agora] Host left');
-        });
-
-        await _agoraClient.join(appId, channel, token, uid || null);
-        console.log('[Agora] Joined channel:', channel);
-        return 'ok';
-      } catch (e) {
-        console.error('[Agora] Join failed:', e);
-        return 'error:' + e.message;
-      }
-    };
-
-    window.agoraLeaveViewer = async function() {
-      try {
-        if (_remoteVideoTrack) { _remoteVideoTrack.stop(); _remoteVideoTrack = null; }
-        if (_remoteAudioTrack) { _remoteAudioTrack.stop(); _remoteAudioTrack = null; }
-        if (_agoraClient) { await _agoraClient.leave(); _agoraClient = null; }
-        const container = _getContainer();
-        if (container) container.innerHTML = '';
-        _activeContainerId = null;
-        console.log('[Agora] Left channel');
-      } catch (e) {
-        console.error('[Agora] Leave failed:', e);
-      }
-    };
-
-    window.agoraIsAvailable = function() {
-      return typeof AgoraRTC !== 'undefined';
-    };
-  </script>
-
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

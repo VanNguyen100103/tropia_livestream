@@ -16,9 +16,10 @@ module.exports = {
     url: process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
   },
 
-  agora: {
-    appId:   process.env.AGORA_APP_ID,
-    appCert: process.env.AGORA_APP_CERTIFICATE,
+  livekit: {
+    apiKey:    process.env.LIVEKIT_API_KEY,
+    apiSecret: process.env.LIVEKIT_API_SECRET,
+    host:      process.env.LIVEKIT_HOST,
   },
 
   cloudinary: {
