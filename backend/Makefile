@@ -1,11 +1,7 @@
-# Tropia backend — common development tasks
+# Tropia backend — common development tasks.
 #
-# Requires:
-#   - go 1.26+
-#   - golang-migrate (https://github.com/golang-migrate/migrate/releases)
-#     On Windows: scoop install migrate  OR  choco install migrate
-#     On macOS:   brew install golang-migrate
-#     On Linux:   apt install golang-migrate  (or download release binary)
+# All `migrate-*` and `seed` targets use the in-tree binaries
+# (cmd/migrate, cmd/seed). No external `migrate.exe` install required.
 
 # Load DATABASE_URL from .env.development if present
 ifneq (,$(wildcard .env.development))
@@ -13,30 +9,41 @@ ifneq (,$(wildcard .env.development))
     export
 endif
 
-MIGRATIONS_DIR := migrations
-
 .PHONY: help
 help:
 	@echo "Tropia backend — make targets"
+	@echo ""
+	@echo "Run / build:"
 	@echo "  make run                  — go run ./cmd/api"
-	@echo "  make build                — build api binary to ./api"
+	@echo "  make build                — build ./api binary"
+	@echo "  make build-all            — build all 3 binaries (api, migrate, seed)"
 	@echo "  make tidy                 — go mod tidy"
 	@echo "  make seed                 — populate DB with deterministic test data"
+	@echo ""
+	@echo "Migrations (in-tree, no external binary needed):"
 	@echo "  make migrate-up           — apply all pending migrations"
-	@echo "  make migrate-down         — rollback last migration"
-	@echo "  make migrate-down-all     — rollback ALL migrations (drops everything)"
-	@echo "  make migrate-status       — show current migration version"
-	@echo "  make migrate-create name=add_phone_to_profiles  — create new migration files"
-	@echo "  make migrate-force ver=1  — mark a specific version (recover from dirty state)"
+	@echo "  make migrate-down         — rollback last 1 migration"
+	@echo "  make migrate-down-all     — rollback EVERYTHING"
+	@echo "  make migrate-status       — show current version + dirty flag"
+	@echo "  make migrate-create name=add_phone_to_profiles  — generate new SQL pair"
+	@echo "  make migrate-force ver=1  — mark version (recover from dirty state)"
+	@echo "  make migrate-goto ver=3   — migrate up or down to a specific version"
 	@echo ""
 	@echo "DATABASE_URL is read from .env.development."
 
-.PHONY: run build tidy seed
+# ── Run / build ──────────────────────────────────────────────────────────────
+
+.PHONY: run build build-all tidy seed
 run:
 	go run ./cmd/api
 
 build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o api ./cmd/api
+
+build-all:
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o api      ./cmd/api
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o migrate  ./cmd/migrate
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o seed     ./cmd/seed
 
 tidy:
 	go mod tidy
@@ -46,24 +53,28 @@ seed:
 
 # ── Migrations ───────────────────────────────────────────────────────────────
 
-.PHONY: migrate-up migrate-down migrate-down-all migrate-status migrate-create migrate-force
+.PHONY: migrate-up migrate-down migrate-down-all migrate-status migrate-create migrate-force migrate-goto
 
 migrate-up:
-	migrate -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)" up
+	go run ./cmd/migrate up
 
 migrate-down:
-	migrate -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)" down 1
+	go run ./cmd/migrate down 1
 
 migrate-down-all:
-	migrate -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)" down -all
+	go run ./cmd/migrate down all
 
 migrate-status:
-	migrate -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)" version
+	go run ./cmd/migrate status
 
 migrate-create:
 	@if [ -z "$(name)" ]; then echo "Usage: make migrate-create name=add_phone_to_profiles"; exit 1; fi
-	migrate create -ext sql -dir $(MIGRATIONS_DIR) -seq $(name)
+	go run ./cmd/migrate create $(name)
 
 migrate-force:
 	@if [ -z "$(ver)" ]; then echo "Usage: make migrate-force ver=1"; exit 1; fi
-	migrate -path $(MIGRATIONS_DIR) -database "$(DATABASE_URL)" force $(ver)
+	go run ./cmd/migrate force $(ver)
+
+migrate-goto:
+	@if [ -z "$(ver)" ]; then echo "Usage: make migrate-goto ver=3"; exit 1; fi
+	go run ./cmd/migrate goto $(ver)

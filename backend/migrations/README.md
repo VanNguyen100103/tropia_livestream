@@ -1,7 +1,9 @@
 # Database migrations
 
-Schema changes are tracked here as numbered files. Use
-[golang-migrate](https://github.com/golang-migrate/migrate) to apply them.
+Schema changes are tracked here as numbered files. Apply / rollback /
+status are handled by the in-tree `cmd/migrate` binary (wraps the
+[golang-migrate](https://github.com/golang-migrate/migrate) library) —
+**no external `migrate.exe` install is needed**, just Go.
 
 ## Layout
 
@@ -18,20 +20,8 @@ Each migration is a pair of SQL files:
 - `<version>_<name>.up.sql` applies the change.
 - `<version>_<name>.down.sql` reverts it.
 
-`golang-migrate` tracks applied versions in a `schema_migrations` table
-that it creates automatically on first run.
-
-## Install golang-migrate
-
-| OS | Command |
-|---|---|
-| Windows (Scoop) | `scoop install migrate` |
-| Windows (Choco) | `choco install migrate` |
-| macOS | `brew install golang-migrate` |
-| Linux | `apt install golang-migrate` (or download release) |
-| Manual | https://github.com/golang-migrate/migrate/releases |
-
-Verify: `migrate -version`
+The `cmd/migrate` binary tracks applied versions in a `schema_migrations`
+table that it creates automatically on first run.
 
 ## Common tasks
 
@@ -40,17 +30,19 @@ common operations and read `DATABASE_URL` from `.env.development`.
 
 ```bash
 # Apply all pending migrations
-make migrate-up
-# or on Windows:
-.\scripts\migrate.ps1 up
+make migrate-up                     # Unix
+.\scripts\migrate.ps1 up            # Windows
+# Or directly:
+go run ./cmd/migrate up
 
-# Roll back the most recent migration
+# Roll back the most recent migration (or last N with `down N`)
 make migrate-down
-.\scripts\migrate.ps1 down
 
-# Show current version
+# Roll back EVERYTHING (destructive)
+make migrate-down-all
+
+# Show current version + dirty flag
 make migrate-status
-.\scripts\migrate.ps1 status
 
 # Create a new migration pair (e.g. add a phone column)
 make migrate-create name=add_phone_to_profiles
@@ -64,7 +56,7 @@ The `create` command produces two empty files like:
 0002_add_phone_to_profiles.down.sql
 ```
 
-Edit them, then `migrate-up`.
+Edit them with your forward / reverse SQL, then `migrate-up`.
 
 ## Workflow
 

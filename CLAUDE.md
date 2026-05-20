@@ -56,29 +56,35 @@ Health: `curl http://localhost:3000/health`.
 
 ### 2b. Database migrations
 
-Schema is managed by [golang-migrate](https://github.com/golang-migrate/migrate)
-in `backend/migrations/`. The Docker Compose Postgres also auto-runs
-`infra/postgres/init.sql` (a copy of migration 0001) on first volume init,
-so for local dev you usually don't need to run migrations manually.
+Schema is managed by the in-tree `cmd/migrate` binary (wraps the
+golang-migrate library — no external `migrate.exe` required, just Go).
+SQL files live in `backend/migrations/`. The Docker Compose Postgres also
+auto-runs `infra/postgres/init.sql` (a copy of migration 0001) on first
+volume init, so for local dev you usually don't need to run migrations
+manually.
 
 For Supabase / production / when you add migration 0002+:
 
 ```bash
 cd backend
+
 # First time pointing at Supabase that already has the initial schema:
 .\scripts\migrate.ps1 force 1     # Windows
 make migrate-force ver=1          # Unix
+# Or directly:
+go run ./cmd/migrate force 1
 
 # Apply any pending migrations
-.\scripts\migrate.ps1 up          # Windows
 make migrate-up                   # Unix
+.\scripts\migrate.ps1 up          # Windows
+go run ./cmd/migrate up           # direct
 
 # Add a new schema change
 .\scripts\migrate.ps1 create add_phone_to_profiles
 # → edits 0002_add_phone_to_profiles.up.sql + .down.sql, then `migrate-up`
 ```
 
-See `backend/migrations/README.md` for full workflow.
+See `backend/migrations/README.md` for the full workflow.
 
 ### 2c. Seed test data
 
