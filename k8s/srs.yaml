@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: srs-config
+  namespace: tropia
+data:
+  srs.conf: |
+    listen              1935;
+    max_connections     1000;
+    daemon              off;
+    srs_log_tank        console;
+    srs_log_level       info;
+
+    http_api {
+        enabled         on;
+        listen          1985;
+        crossdomain     on;
+    }
+    http_server {
+        enabled         on;
+        listen          8080;
+        dir             ./objs/nginx/html;
+        crossdomain     on;
+    }
+    stats { network 0; }
+    rtc_server {
+        enabled         on;
+        listen          8000;
+        candidate       $CANDIDATE;
+    }
+    srt_server {
+        enabled         on;
+        listen          10080;
+        maxbw           1000000000;
+    }
+    vhost __defaultVhost__ {
+        hls {
+            enabled       on;
+            hls_path      ./objs/nginx/html;
+            hls_fragment  2;
+            hls_window    30;
+            hls_cleanup   on;
+            hls_dispose   30;
+        }
+        http_remux { enabled on; mount [vhost]/[app]/[stream].flv; }
+        rtc { enabled on; rtmp_to_rtc on; rtc_to_rtmp on; }
+        srt { enabled on; srt_to_rtmp on; }
+        http_hooks {
+            enabled       on;
+            on_publish    http://backend:3000/api/srs/on_publish;
+            on_unpublish  http://backend:3000/api/srs/on_unpublish;
+            on_play       http://backend:3000/api/srs/on_play;
+            on_stop       http://backend:3000/api/srs/on_stop;
+            on_dvr        http://backend:3000/api/srs/on_dvr;
+        }
+        dvr {
+            enabled     on;
+            dvr_apply   all;
+            dvr_path    ./objs/nginx/html/dvr/[app]/[stream].[timestamp].flv;
+            dvr_plan    session;
+        }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: srs
+  namespace: tropia
+spec:
+  type: LoadBalancer  # so OBS / browsers can reach it from outside the cluster
+  ports:
+    - { name: rtmp,    port: 1935,  targetPort: 1935,  protocol: TCP }
+    - { name: hls,     port: 8080,  targetPort: 8080,  protocol: TCP }
+    - { name: api,     port: 1985,  targetPort: 1985,  protocol: TCP }
+    - { name: webrtc,  port: 8000,  targetPort: 8000,  protocol: UDP }
+    - { name: srt,     port: 10080, targetPort: 10080, protocol: UDP }
+  selector:
+    app: srs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: srs
+  namespace: tropia
+spec:
+  replicas: 1   # SRS origin; for edge scaling use a separate Deployment + edge_cluster
+  selector:
+    matchLabels:
+      app: srs
+  template:
+    metadata:
+      labels:
+        app: srs
+    spec:
+      containers:
+        - name: srs
+          image: ossrs/srs:5
+          command: [./objs/srs, -c, conf/srs.conf]
+          ports:
+            - { containerPort: 1935 }
+            - { containerPort: 8080 }
+            - { containerPort: 1985 }
+            - { containerPort: 8000, protocol: UDP }
+            - { containerPort: 10080, protocol: UDP }
+          volumeMounts:
+            - { name: config, mountPath: /usr/local/srs/conf/srs.conf, subPath: srs.conf, readOnly: true }
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+      volumes:
+        - name: config
+          configMap:
+            name: srs-config

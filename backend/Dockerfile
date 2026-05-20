@@ -1,5 +1,6 @@
 # Multi-stage build for Tropia Go backend
-FROM golang:1.23-alpine AS builder
+# Pin the toolchain so docker builds reproduce go.mod's `go 1.26.3`.
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 

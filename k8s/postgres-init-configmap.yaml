@@ -1,0 +1,18 @@
+# Mount infra/postgres/init.sql as a ConfigMap so the Postgres init scripts
+# run on first boot. Generate this file with:
+#
+#   kubectl create configmap postgres-init \
+#     --from-file=init.sql=infra/postgres/init.sql \
+#     -n tropia --dry-run=client -o yaml > k8s/postgres-init-configmap.yaml
+#
+# The placeholder below is here so `kubectl apply -f k8s/` doesn't fail when
+# the file is missing — replace it before deploying.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: tropia
+data:
+  init.sql: |
+    -- Placeholder. Regenerate with the command above before deploying.
+    SELECT 1;

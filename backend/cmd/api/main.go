@@ -168,6 +168,11 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "tropia-backend", "ts": time.Now().Unix()})
 	})
 
+	// Prometheus
+	metrics := httpx.NewMetrics()
+	router.Use(metrics.Middleware())
+	router.GET("/metrics", httpx.MetricsHandler())
+
 	authMw := auth.Middleware(jwtSvc)
 	sellerMw := auth.RequireRole(auth.RoleSeller, auth.RoleAdmin)
 	adminMw := auth.RequireRole(auth.RoleAdmin)

@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: tropia
+data:
+  PORT: "3000"
+  GIN_MODE: release
+  CORS_ORIGIN: "*"
+  REDIS_ADDR: redis:6379
+  REDIS_DB: "0"
+  JWT_ACCESS_TTL: 15m
+  JWT_REFRESH_TTL: 168h
+  SRS_RTMP_HOST: rtmp://srs:1935
+  SRS_HLS_HOST: http://srs:8080
+  SRS_WHIP_HOST: http://srs:1985
+  SRS_API_HOST: http://srs:1985
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: tropia
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+  selector:
+    app: backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: tropia
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: backend
+          image: tropia/backend:dev   # bump via CI
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef: { name: backend-config }
+            - secretRef:    { name: tropia-secrets }
+          # DATABASE_URL is composed from secret components
+          env:
+            - name: DATABASE_URL
+              value: postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/tropia?sslmode=disable
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: "1",  memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /health, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 3000 }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+---
+# HorizontalPodAutoscaler — scales backend on CPU
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: tropia
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
