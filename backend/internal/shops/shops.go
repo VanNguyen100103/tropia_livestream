@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/tropia/backend-go/internal/auth"
-	"github.com/tropia/backend-go/internal/httpx"
+	"github.com/tropia/backend/internal/auth"
+	"github.com/tropia/backend/internal/httpx"
 )
 
 type Shop struct {

@@ -6,8 +6,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/tropia/backend-go/internal/ai"
-	"github.com/tropia/backend-go/internal/httpx"
+	"github.com/tropia/backend/internal/ai"
+	"github.com/tropia/backend/internal/httpx"
 )
 
 // AIHandler exposes DeepSeek-backed endpoints on top of a live session:

@@ -1,16 +1,54 @@
-# tropia
+# Tropia
 
-Tropia fresh grocery app with Live shopping
+Vietnamese fresh grocery app with Shopee-Live-style livestream shopping.
 
-## Getting Started
+```
+Tropia/
+├── frontend/   Flutter app (Android, iOS, Web, desktop)
+├── backend/    Go API (Gin + SRS + Postgres + Redis + R2)
+├── infra/      Docker Compose stack for local development
+├── k8s/        Kubernetes manifests for production
+├── docs/       Documentation
+└── CLAUDE.md   Project overview / AI agent guide
+```
 
-This project is a starting point for a Flutter application.
+## Stack
 
-A few resources to get you started if this is your first Flutter project:
+- **Media**: SRS 5 (RTMP / SRT / WHIP ingest, LL-HLS / WHEP playback) + FFmpeg + NVENC
+- **Backend**: Go 1.26 (Gin / pgx / go-redis / JWT / OAuth2)
+- **Storage**: Cloudflare R2 (S3-compatible)
+- **Database**: PostgreSQL (Supabase managed or self-hosted in K8s)
+- **Cache / Events**: Redis 7 (cache, locks, rate limits, Streams)
+- **Frontend**: Flutter 3.x
+- **Deploy**: Kubernetes
+- **Observability**: Prometheus + Grafana
+- **CDN**: Cloudflare
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## Quick start (local dev)
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+# 1. Start infra (Postgres + Redis + SRS via Docker Compose)
+cd infra && docker compose up -d
+
+# 2. Configure backend
+cp backend/.env.example backend/.env.development
+# Edit backend/.env.development with your secrets (Supabase / R2 / OAuth / payment)
+
+# 3. Run Go backend
+cd backend && go run ./cmd/api
+# → http://localhost:3000/health
+
+# 4. Run Flutter app
+cd frontend && flutter pub get && flutter run
+```
+
+See [CLAUDE.md](CLAUDE.md) for the full project overview.
+
+## Production deploy
+
+Kubernetes manifests in [k8s/](k8s/). See [k8s/README.md](k8s/README.md)
+for deploy instructions.
+
+## License
+
+Private — Tropia internal project.

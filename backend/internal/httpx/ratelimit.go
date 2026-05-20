@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tropia/backend-go/internal/cache"
+	"github.com/tropia/backend/internal/cache"
 )
 
 type RateLimitConfig struct {

@@ -12,7 +12,7 @@ import (
 	"golang.org/x/oauth2"
 	googleoauth "golang.org/x/oauth2/google"
 
-	"github.com/tropia/backend-go/internal/httpx"
+	"github.com/tropia/backend/internal/httpx"
 )
 
 type GoogleOAuth struct {

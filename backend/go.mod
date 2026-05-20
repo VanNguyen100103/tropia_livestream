@@ -1,4 +1,4 @@
-module github.com/tropia/backend-go
+module github.com/tropia/backend
 
 go 1.26.3
 

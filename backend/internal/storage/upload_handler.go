@@ -11,8 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/tropia/backend-go/internal/auth"
-	"github.com/tropia/backend-go/internal/httpx"
+	"github.com/tropia/backend/internal/auth"
+	"github.com/tropia/backend/internal/httpx"
 )
 
 type UploadHandler struct {

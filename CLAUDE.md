@@ -1,109 +1,194 @@
-# Tropia – Live & Video Feature Module
+# Tropia – Live Shopping Platform
 
-## Tổng quan dự án
+Ứng dụng mua sắm thực phẩm tươi sống Việt Nam với tính năng livestream bán
+hàng (Shopee Live style). Stack production-grade trên SRS + Go + Postgres
++ Redis + Cloudflare R2 + Kubernetes.
 
-Tropia là ứng dụng mua sắm thực phẩm tươi sống Việt Nam, được xây dựng bằng Flutter.
-Module **Live & Video** (tính năng chính trong codebase này) cho phép người dùng xem và tương tác với các buổi livestream bán hàng – tương tự Shopee Live.
+## Cấu trúc monorepo
 
-## Yêu cầu
+```
+Tropia/
+├── frontend/        Flutter app (Android / iOS / Web / Windows / macOS / Linux)
+├── backend/         Go API (Gin + pgx + SRS integration)
+├── infra/           Docker Compose stack cho local dev
+├── k8s/             Kubernetes manifests cho production
+├── docs/            Documentation
+└── CLAUDE.md        This file
+```
 
-- Flutter 3.x (SDK ≥ 3.0.0)
-- Dart ≥ 3.0.0
-- Android Studio hoặc VS Code với Flutter extension
+## Stack
 
-## Chạy dự án
+| Layer | Tech |
+|---|---|
+| Frontend | Flutter 3.x + Provider + Dio + video_player/chewie (HLS) |
+| Backend | Go 1.26 + Gin + pgx + go-redis + JWT + OAuth2 (Google) |
+| Media server | SRS 5 (RTMP / SRT / WHIP ingest, LL-HLS / WHEP playback) |
+| Database | PostgreSQL (Supabase managed, or local Postgres in K8s) |
+| Cache / Events | Redis 7 (cache, distributed lock, sliding-window rate limit, Streams pub/sub) |
+| Object storage | Cloudflare R2 (S3 SDK) for VOD + image uploads |
+| Payment | MoMo + VNPay + ZaloPay (HMAC) |
+| AI | DeepSeek (live AI suggestions, auto-reply, sentiment analysis) |
+| Email | SMTP (Gmail App Password) |
+| Deploy | Kubernetes (StatefulSet for Postgres, Deployment + HPA for backend) |
+| Observability | Prometheus /metrics + Grafana datasource |
+
+## Local development
+
+### 1. Start infra (Postgres + Redis + SRS)
 
 ```bash
+cd infra
+docker compose up -d
+```
+
+Postgres → host port `5433` (5432 conflicts with native pg on this machine).
+Redis → host port `6380`. SRS → 1935 (RTMP) / 8080 (HLS) / 1985 (HTTP API).
+
+### 2. Start Go backend
+
+```bash
+cd backend
+go run ./cmd/api
+```
+
+Reads `backend/.env.development` (gitignored). Listens on `:3000`.
+Health: `curl http://localhost:3000/health`.
+
+### 3. Start Flutter
+
+```bash
+cd frontend
 flutter pub get
 flutter run
 ```
 
-## Cấu trúc thư mục
+Android emulator targets `http://10.0.2.2:3000` for the backend.
+Physical device on same LAN → set the LAN IP of your host machine.
+
+## Key endpoints (Go backend)
+
+| Path | Auth | Description |
+|---|---|---|
+| `POST /api/auth/register` | none | Register + emit OTP to Redis |
+| `POST /api/auth/verify-otp` | none | Verify email OTP |
+| `POST /api/auth/login` | none | bcrypt + JWT issuance + refresh cookie |
+| `POST /api/auth/refresh` | cookie/body | Refresh rotation + reuse detection |
+| `GET /api/auth/google` | none | Google OAuth2 redirect |
+| `GET /api/live/streams` | none | List active streams |
+| `POST /api/live/streams` | seller | Create stream, returns RTMP/WHIP/SRT publish URLs |
+| `GET /api/live/streams/:id/playback` | none | Returns HLS / FLV / WHEP playback URLs |
+| `POST /api/live/streams/:id/ai-suggestions` | yes | DeepSeek viewer questions |
+| `POST /api/srs/on_publish` | SRS only | Webhook from SRS when stream starts |
+| `POST /api/payment/momo` / `/vnpay` / `/zalopay` | yes | Init payment |
+| `GET /health` | none | Liveness probe |
+| `GET /metrics` | none | Prometheus scrape endpoint |
+
+## Stream flow
+
+1. Seller calls `POST /api/live/streams` → backend creates session, returns
+   `{publish: {rtmp, whip, srt}}`.
+2. Seller pushes media via OBS / Larix Broadcaster to the RTMP URL.
+3. SRS calls `POST /api/srs/on_publish` → backend marks stream as live.
+4. Viewer calls `GET /api/live/streams/:id/playback` → gets HLS URL.
+5. Flutter app plays via `HlsViewer` (video_player + chewie).
+6. SRS DVR records to FLV → backend uploads to R2 on `on_dvr`.
+
+## Flutter frontend (frontend/lib)
 
 ```
 lib/
-├── main.dart                          # Entry point
+├── main.dart
 ├── core/
-│   ├── constants/app_constants.dart   # AppColors, AppStrings, AppSizes, AppUrls
-│   ├── theme/app_theme.dart           # ThemeData Tropia (light + dark)
-│   └── utils/logger.dart             # AppLogger – ghi log tập trung
+│   ├── config/app_config.dart      (backendUrl, API prefixes)
+│   ├── constants/app_constants.dart (AppColors, AppStrings, AppSizes, AppUrls)
+│   ├── services/auth_service.dart  (Dio + JWT interceptor)
+│   ├── theme/app_theme.dart
+│   └── utils/logger.dart
 └── features/
-    ├── main/screens/main_screen.dart  # Bottom nav 5 tabs
-    ├── home/screens/home_screen.dart  # Tab Trang chủ
-    └── live/                          # Module Live & Video
-        ├── models/live_stream_model.dart   # Models: LiveStream, LiveProduct, ...
-        ├── providers/live_provider.dart    # State management (ChangeNotifier)
-        ├── screens/
-        │   ├── live_tab_screen.dart        # Danh sách streams (grid)
-        │   └── live_stream_screen.dart     # Màn hình xem live đầy đủ
-        └── widgets/
-            ├── live_card_widget.dart           # Card trong danh sách
-            ├── live_actions_widget.dart        # Like/Share/Comment bên phải
-            ├── live_chat_widget.dart           # Chat overlay
-            ├── live_product_card_widget.dart   # Card sản phẩm bên trái
-            ├── live_product_popup.dart         # Popup chi tiết sản phẩm
-            ├── live_reward_widget.dart         # Panel PHẦN THƯỞNG
-            └── live_voucher_popup.dart         # Popup voucher
+    ├── main/                       Bottom nav 5 tabs
+    ├── home/                       Tab Trang chủ
+    ├── live/                       Live & Video module
+    │   ├── data/live_repository.dart   (calls Go backend)
+    │   ├── models/live_stream_model.dart
+    │   ├── providers/live_provider.dart (Provider state)
+    │   ├── services/srs_service.dart  (typed SRS endpoint client)
+    │   ├── services/ai_suggestion_service.dart
+    │   ├── screens/
+    │   │   ├── live_tab_screen.dart
+    │   │   ├── live_stream_screen.dart  (HLS viewer + overlays)
+    │   │   ├── live_host_screen.dart    (publish info for OBS)
+    │   │   └── live_setup_screen.dart
+    │   └── widgets/
+    │       ├── hls_viewer.dart          (video_player + chewie)
+    │       ├── rtmp_publish_info.dart   (copy-able RTMP/WHIP/SRT URLs)
+    │       ├── live_chat_widget.dart
+    │       ├── live_product_card_widget.dart
+    │       ├── live_actions_widget.dart
+    │       └── ...
+    ├── shop/                       Shop CRUD + follow
+    ├── product/                    Product browse + detail
+    ├── cart/                       Cart + checkout
+    ├── order/                      Order history
+    ├── upload/                     Image upload to R2
+    └── user/                       Auth screens (login, register, OTP, profile)
 ```
 
-## Kiến trúc State Management
+State management: **Provider** (ChangeNotifier). `LiveProvider` is mounted
+at `MainScreen` so the entire Live tab tree shares one instance.
 
-Dùng **Provider** package (ChangeNotifier pattern):
+## Conventions
 
+- **No mock data in lib/**. All data comes from the Go backend via
+  `LiveRepository` / `AuthService.authorizedDio()`. The 6 fake streams
+  (Con Cưng, Lạc Yên, ...) were removed when the backend was wired up.
+- **No hardcoded strings/colors** — use `AppStrings.xxx`, `AppColors.xxx`.
+- **Log user events** via `AppLogger.logUserEvent(action, context, metadata)`.
+- **HLS player** is `HlsViewer` (`video_player` + `chewie`). LiveKit /
+  Agora code has been removed (Phase 16). For in-app camera publishing,
+  see `lib/features/live/FLUTTER_PORT_TODO.md`.
+
+## Production deploy
+
+See `k8s/README.md` for full instructions. Summary:
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+cp k8s/secrets.example.yaml k8s/secrets.yaml && $EDITOR k8s/secrets.yaml
+kubectl apply -f k8s/secrets.yaml
+kubectl create configmap postgres-init \
+  --from-file=init.sql=infra/postgres/init.sql -n tropia
+docker build -t registry.tropia.vn/backend:v1.0.0 backend/
+docker push registry.tropia.vn/backend:v1.0.0
+kubectl apply -f k8s/
 ```
-LiveProvider (ChangeNotifier)
-    ↑ provides to
-LiveTabScreen → LiveStreamScreen → [all widgets]
-```
 
-Provider được đặt ở `MainScreen` bọc toàn bộ tab Live.
+Backend exposes Prometheus metrics at `/metrics`. The
+`prometheus.io/scrape` annotation on the backend Deployment lets the
+included Prometheus pick them up automatically.
 
-## Logging
+## Security
 
-Dùng `AppLogger` (không import trực tiếp `logger` package):
+- Real `.env.*` files (dev/staging/prod) are gitignored. Only
+  `.env.example` is committed.
+- `k8s/secrets.yaml` is gitignored. Only `secrets.example.yaml` is
+  committed.
+- JWT secrets must be ≥ 32 bytes (config loader enforces this).
+- Cookies use `SameSite=Strict`, `Secure` in release mode, path
+  `/api/auth`.
+- BOLA defense returns 404 not 403 (mirrors Node.js parity).
+- Rate limits: login 5/min, register 3/5min, payment 10/min — all
+  fail-closed via Redis sliding-window Lua script.
 
-```dart
-AppLogger.logInfo('MyWidget', 'Message here');
-AppLogger.logError('MyProvider', 'Failed', error, stackTrace);
-AppLogger.logUserEvent(
-  action: 'button_tapped',
-  context: 'MyScreen',
-  metadata: {'key': 'value'},
-);
-```
+## Audit / migration history
 
-## Mock Data
+See `backend/AUDIT.md` for the full 800-line audit of the original
+Node.js + Supabase backend that was ported to this Go service across 20
+phases (`git log --oneline`). Notable preserved quirks (documented in
+the audit):
 
-`LiveProvider._buildMockStreams()` tạo 6 streams giả:
-1. Con Cưng Official (Mẹ & Bé, LIVE)
-2. Lạc Yên Foods (Thực phẩm, LIVE)
-3. PUMA Official Vietnam (Thời trang, LIVE)
-4. Shondo Shoes (Giày dép, LIVE)
-5. Beauty by Linh Nguyễn (Mỹ phẩm, LIVE)
-6. Tropia Fresh Market (VOD, đã kết thúc)
-
-## Tính năng đặt hàng tự động
-
-Trong `LiveProductCardWidget` và `LiveProductPopup`:
-- Toggle switch "Đặt hàng tự động"
-- Khi bật: hiện AlertDialog xác nhận → `provider.toggleAutoOrder()`
-- Sau 2 giây: gọi `provider.placeAutoOrder()` (mock log)
-- Log event: `auto_order_enabled`, `auto_order_placed`
-
-## Dependencies chính
-
-| Package | Mục đích |
-|---------|----------|
-| provider | State management |
-| cached_network_image | Load ảnh từ URL với cache |
-| shimmer | Loading placeholder |
-| logger | Logging engine |
-| video_player + chewie | Sẵn sàng cho video thực (chưa integrate) |
-
-## Ghi chú cho developer mới
-
-1. **Không dùng màu inline** – luôn dùng `AppColors.xxx`
-2. **Không dùng string hardcode** – dùng `AppStrings.xxx`
-3. **Log mọi tương tác** – dùng `AppLogger.logUserEvent()`
-4. **Mock data** ở `live_provider.dart:_buildMockStreams()` – thay bằng API call khi có backend
-5. **Video stream** – hiện dùng gradient placeholder; tích hợp `chewie` khi có URL HLS thực
+- `live_orders.unit_price` is overloaded — per-item for live placeOrder,
+  subtotal for cart checkout.
+- `cart_items.variant_id` holds either `product_variants.id` OR
+  `live_session_products.id`.
+- `live_sessions.agora_channel` is now the SRS stream key (field name
+  kept for back-compat).

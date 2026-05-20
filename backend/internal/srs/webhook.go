@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tropia/backend-go/internal/live"
+	"github.com/tropia/backend/internal/live"
 )
 
 // SRS webhook handler

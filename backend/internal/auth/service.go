@@ -15,8 +15,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/tropia/backend-go/internal/cache"
-	"github.com/tropia/backend-go/internal/httpx"
+	"github.com/tropia/backend/internal/cache"
+	"github.com/tropia/backend/internal/httpx"
 )
 
 const (
