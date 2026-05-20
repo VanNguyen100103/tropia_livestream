@@ -670,7 +670,7 @@ class LiveStream {
   /// URL thumbnail (ảnh xem trước khi chưa vào)
   final String thumbnailUrl;
 
-  /// URL video stream (HLS/RTMP) – mock: để trống hoặc dùng sample video
+  /// URL video stream (HLS m3u8 from SRS) — populated by SrsService.getPlayback().
   final String? streamUrl;
 
   /// Trạng thái: live / ended / upcoming

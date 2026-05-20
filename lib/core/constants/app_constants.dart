@@ -5,7 +5,7 @@
 //   - Màu sắc thương hiệu (AppColors)
 //   - Chuỗi văn bản tĩnh (AppStrings)
 //   - Kích thước & spacing (AppSizes)
-//   - URL & endpoint mock (AppUrls)
+//   - Placeholder image URLs (AppUrls)
 //
 // HƯỚNG DẪN SỬ DỤNG:
 //   import 'package:tropia/core/constants/app_constants.dart';
@@ -161,7 +161,7 @@ abstract class AppStrings {
   static const String hostLiveRevenue = 'Doanh thu';
   static const String hostLiveDuration = 'Thời lượng';
   static const String hostLiveSummary = 'Tổng kết buổi Live';
-  static const String hostLiveCameraOff = 'Camera đang tắt\n(Mock mode)';
+  static const String hostLiveCameraOff = 'Camera đang tắt';
 
   // Notifications / snackbars
   static const String notifVoucherSaved = 'Đã lưu voucher thành công!';

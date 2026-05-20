@@ -57,9 +57,11 @@ of LiveKit token fetch. Persist `streamId` + `publish.rtmp` on the seller's
 device until they end the stream.
 
 ### Provider
-`LiveProvider` mock data + actions can stay — they don't reference LiveKit.
-Once the API client is wired through `SrsService`, swap `_buildMockStreams`
-to `SrsService.listActive()`.
+`LiveProvider` already calls `LiveRepository` (real Go backend) — no mock
+data remains. The repository was rewired to the new endpoints
+(`/api/live/streams/...` instead of `/api/live`). Row mappers updated to
+handle the Go response shape (flat session row, products fetched
+separately via `LiveRepository.fetchSessionProducts`).
 
 ## Why this isn't auto-rewritten
 

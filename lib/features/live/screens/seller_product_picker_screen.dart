@@ -76,7 +76,7 @@ class _SellerProductPickerScreenState
       final result = await ProductRepository.instance.getSellerProducts(limit: 100);
       setState(() {
         _myProducts = result.items;
-        // "Gần đây" = last 10 items (mock: same list sliced)
+        // "Gần đây" = first 10 items returned from API
         _recentProducts = result.items.take(10).toList();
         _loading = false;
       });

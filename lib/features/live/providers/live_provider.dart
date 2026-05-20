@@ -160,38 +160,44 @@ class LiveProvider extends ChangeNotifier {
 
   // ─── Row mappers ──────────────────────────────────────────────────────────
 
+  /// Maps a `session` object from the Go backend to a [LiveStream] view-model.
+  ///
+  /// The Go backend returns a flat session row (no JOIN to profiles/products
+  /// yet). Products are fetched separately via [LiveRepository.fetchSessionProducts].
   LiveStream _rowToLiveStream(Map<String, dynamic> row) {
-    final profile  = (row['profiles'] as Map<String, dynamic>?) ?? {};
-    final products = (row['live_session_products'] as List? ?? [])
+    final products = (row['products'] as List? ?? row['live_session_products'] as List? ?? const [])
         .cast<Map<String, dynamic>>()
         .map(_rowToLiveProduct)
         .toList();
+
+    final category = (row['category'] ?? '') as String;
+    final startedAtStr = row['started_at'] as String?;
 
     return LiveStream(
       id:              row['id'] as String,
       sellerId:        row['seller_id'] as String,
       shopId:          row['shop_id'] as String?,
-      sellerName:      ((profile['shop_name'] ?? profile['name']) ?? 'Unknown') as String,
-      sellerAvatarUrl: (profile['avatar_url'] ?? AppUrls.placeholderAvatar) as String,
+      sellerName:      (row['seller_name'] ?? row['shop_name'] ?? 'Người bán') as String,
+      sellerAvatarUrl: (row['seller_avatar'] ?? row['avatar_url'] ?? AppUrls.placeholderAvatar) as String,
       isVerified:      false,
       title:           row['title'] as String,
-      description:     '${row['category']} – Live shopping',
-      thumbnailUrl:    AppUrls.placeholderBanner,
+      description:     (row['description'] as String?) ?? '$category – Live shopping',
+      thumbnailUrl:    (row['cover_image_url'] as String?) ?? AppUrls.placeholderBanner,
       status:          row['status'] == 'live' ? StreamStatus.live : StreamStatus.ended,
       viewerCount:     (row['viewer_count'] as num? ?? 0).toInt(),
       likeCount:       (row['like_count'] as num? ?? 0).toInt(),
       isLiked:         false,
       isFollowing:     false,
-      category:        row['category'] as String,
-      gradientColors:  ['#2E7D32', '#1B5E20'],
-      startedAt:       DateTime.parse(row['started_at'] as String),
+      category:        category,
+      gradientColors:  const ['#2E7D32', '#1B5E20'],
+      startedAt:       startedAtStr != null ? DateTime.parse(startedAtStr) : DateTime.now(),
       reward: const LiveReward(
         attendanceCoins: 50, watchCoins: 3, watchSeconds: 0,
         totalEarnedCoins: 0, hasAttended: false, nextRewardCoins: 100,
       ),
-      vouchers: [],
+      vouchers: const [],
       products: products,
-      comments: [],
+      comments: const [],
     );
   }
 
@@ -213,7 +219,7 @@ class LiveProvider extends ChangeNotifier {
 
   LiveComment _rowToComment(Map<String, dynamic> row) {
     final message  = (row['message'] ?? '') as String;
-    final username = ((row['user_name'] ?? row['username']) ?? 'Người dùng') as String;
+    final username = (row['username'] ?? row['user_name'] ?? 'Người dùng') as String;
     final isHost   = (row['is_host'] as bool?) == true
         || username == 'Trợ lý AI'
         || message.startsWith('🤖')
@@ -226,7 +232,7 @@ class LiveProvider extends ChangeNotifier {
       timestamp: row['created_at'] != null
           ? DateTime.parse(row['created_at'] as String)
           : DateTime.now(),
-      avatarUrl: (row['user_avatar'] ?? row['avatar_url']) as String?,
+      avatarUrl: (row['avatar_url'] ?? row['user_avatar']) as String?,
       isHost:    isHost,
     );
   }
@@ -417,10 +423,11 @@ class LiveProvider extends ChangeNotifier {
 
     final session      = result['session'] as Map<String, dynamic>;
     final sessionId    = session['id'] as String;
-    final agoraChannel = result['agoraChannel'] as String;
+    // Go backend returns the stream key as session.agora_channel (legacy name).
+    final streamKey    = (session['agora_channel'] as String?) ?? '';
 
     _hostSessionId   = sessionId;
-    _hostChannelName = agoraChannel;
+    _hostChannelName = streamKey;
 
     // Add stream to top of list so buyer sees it immediately
     final newStream = LiveStream(
@@ -451,9 +458,9 @@ class LiveProvider extends ChangeNotifier {
 
     _streams.insert(0, newStream);
 
-    AppLogger.logInfo(_tag, 'Published: $sessionId / Agora: $agoraChannel');
+    AppLogger.logInfo(_tag, 'Published: $sessionId / streamKey: $streamKey');
     notifyListeners();
-    return agoraChannel;
+    return streamKey;
   }
 
   Future<void> unpublishHostStream() async {
@@ -516,10 +523,10 @@ class LiveProvider extends ChangeNotifier {
     required int quantity,
   }) async {
     try {
+      // Go backend's POST /api/orders takes live_product_id, not session_id+product_id.
       await LiveRepository.instance.placeOrder(
-        sessionId: streamId,
-        productId: productId,
-        quantity:  quantity,
+        liveProductId: productId,
+        quantity:      quantity,
       );
       _activeProductPopupId = null;
       notifyListeners();
