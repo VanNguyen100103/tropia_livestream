@@ -94,7 +94,8 @@ class ProductRepository {
 
   // ── Upload ────────────────────────────────────────────────────────────────
 
-  /// POST /api/upload/temp — upload ảnh tạm, trả về URL Cloudinary
+  /// POST /api/upload/temp — upload ảnh tạm, backend lưu lên Cloudflare R2
+  /// rồi trả về URL public (pub-xxx.r2.dev hoặc R2_PUBLIC_URL).
   Future<String> uploadTempImage(File imageFile) async {
     final formData = FormData.fromMap({
       'image': await MultipartFile.fromFile(

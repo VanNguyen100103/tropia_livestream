@@ -29,6 +29,7 @@ func (h *UploadHandler) Register(r *gin.RouterGroup, authMw, sellerMw gin.Handle
 
 	seller := r.Group("/", authMw, sellerMw)
 	seller.POST("/product", h.product)
+	seller.POST("/variant", h.variant)
 	seller.POST("/shop", h.shop)
 	seller.POST("/live", h.liveCover)
 	seller.POST("/temp", h.temp)
@@ -115,6 +116,52 @@ func (h *UploadHandler) product(c *gin.Context) {
 			continue
 		}
 		key := fmt.Sprintf("products/%s/%d_%d%s", productID, time.Now().UnixNano(), i, ext)
+		url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
+		if err != nil {
+			continue
+		}
+		urls = append(urls, url)
+	}
+	c.JSON(http.StatusOK, gin.H{"urls": urls})
+}
+
+// variant uploads images for a specific product_variant (color/size SKU).
+// Form: variant_id (text) + images[] (max 5 files).
+// Returns {urls: [...]} matching the product endpoint shape.
+func (h *UploadHandler) variant(c *gin.Context) {
+	variantID := c.PostForm("variant_id")
+	if variantID == "" {
+		c.Error(httpx.NewValidation("variant_id required", nil))
+		return
+	}
+	form, err := c.MultipartForm()
+	if err != nil {
+		c.Error(httpx.NewValidation("multipart parse failed", nil))
+		return
+	}
+	files := form.File["images"]
+	if len(files) == 0 {
+		c.Error(httpx.NewValidation("no files", nil))
+		return
+	}
+	if len(files) > 5 {
+		c.Error(httpx.NewValidation("max 5 files per variant", nil))
+		return
+	}
+	urls := make([]string, 0, len(files))
+	for i, fh := range files {
+		f, err := fh.Open()
+		if err != nil {
+			continue
+		}
+		data, _ := io.ReadAll(f)
+		f.Close()
+		ext := strings.ToLower(path.Ext(fh.Filename))
+		ct := allowedExts[ext]
+		if ct == "" {
+			continue
+		}
+		key := fmt.Sprintf("variants/%s/%d_%d%s", variantID, time.Now().UnixNano(), i, ext)
 		url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 		if err != nil {
 			continue

@@ -6,76 +6,103 @@ import 'package:tropia/core/utils/logger.dart';
 
 const _tag = 'UploadRepository';
 
+/// Upload client for Tropia's Go backend, which stores files on Cloudflare R2.
+///
+/// All endpoints return:
+///   - single-file:  { "url": "https://pub-<hash>.r2.dev/<key>", "key": "<key>" }
+///   - multi-file:   { "urls": [ "https://...", ... ] }
+///
+/// 5 MB per file, jpg/png/webp only (enforced server-side).
 class UploadRepository {
   UploadRepository._();
   static final instance = UploadRepository._();
 
-  get _dio => AuthService.instance.authorizedDio();
+  Dio get _dio => AuthService.instance.authorizedDio();
 
   // ── Avatar ────────────────────────────────────────────────────────────────
 
-  /// POST /api/upload/avatar  → { url, publicId }
+  /// POST /api/upload/avatar — any authenticated user.
+  /// Form: `image` (file).  Response: `{ url, key }`.
   Future<String> uploadAvatar(File file) async {
     final form = FormData.fromMap({
       'image': await MultipartFile.fromFile(file.path, filename: 'avatar.jpg'),
     });
     final res = await _dio.post('/api/upload/avatar', data: form);
     AppLogger.logInfo(_tag, 'Avatar uploaded');
-    return res.data['url'] as String;
+    return (res.data as Map<String, dynamic>)['url'] as String;
   }
 
   // ── Product images ────────────────────────────────────────────────────────
 
-  /// POST /api/upload/product  → [{ url, publicId }, ...]
+  /// POST /api/upload/product — seller/admin only.
+  /// Form: `product_id`, `images[]` (up to 10).  Response: `{ urls: [...] }`.
   Future<List<String>> uploadProductImages(String productId, List<File> files) async {
     final form = FormData.fromMap({
-      'productId': productId,
+      'product_id': productId,
       'images': await Future.wait(
         files.map((f) => MultipartFile.fromFile(f.path, filename: f.uri.pathSegments.last)),
       ),
     });
     final res = await _dio.post('/api/upload/product', data: form);
-    final list = res.data as List;
-    AppLogger.logInfo(_tag, 'Uploaded ${list.length} product images');
-    return list.map((e) => e['url'] as String).toList();
+    final urls = ((res.data as Map<String, dynamic>)['urls'] as List).cast<String>();
+    AppLogger.logInfo(_tag, 'Uploaded ${urls.length} product images');
+    return urls;
   }
 
   // ── Variant images ────────────────────────────────────────────────────────
 
-  /// POST /api/upload/variant  → [{ url, publicId }, ...]
+  /// POST /api/upload/variant — seller/admin only.
+  /// Form: `variant_id`, `images[]` (up to 5).  Response: `{ urls: [...] }`.
   Future<List<String>> uploadVariantImages(String variantId, List<File> files) async {
     final form = FormData.fromMap({
-      'variantId': variantId,
+      'variant_id': variantId,
       'images': await Future.wait(
         files.map((f) => MultipartFile.fromFile(f.path, filename: f.uri.pathSegments.last)),
       ),
     });
     final res = await _dio.post('/api/upload/variant', data: form);
-    final list = res.data as List;
-    return list.map((e) => e['url'] as String).toList();
+    return ((res.data as Map<String, dynamic>)['urls'] as List).cast<String>();
   }
 
   // ── Shop banner ───────────────────────────────────────────────────────────
 
-  /// POST /api/upload/shop  → { url, publicId }
+  /// POST /api/upload/shop — seller/admin only.
+  /// Form: `shop_id`, `image`.  Response: `{ url, key }`.
   Future<String> uploadShopBanner(String shopId, File file) async {
     final form = FormData.fromMap({
-      'shopId': shopId,
-      'image':  await MultipartFile.fromFile(file.path, filename: 'banner.jpg'),
+      'shop_id': shopId,
+      'image':   await MultipartFile.fromFile(file.path, filename: 'banner.jpg'),
     });
     final res = await _dio.post('/api/upload/shop', data: form);
-    return res.data['url'] as String;
+    return (res.data as Map<String, dynamic>)['url'] as String;
   }
 
   // ── Live thumbnail ────────────────────────────────────────────────────────
 
-  /// POST /api/upload/live  → { url, publicId }
+  /// POST /api/upload/live — seller/admin only.
+  /// Form: `session_id`, `image`.  Response: `{ url, key }`.
   Future<String> uploadLiveThumbnail(String sessionId, File file) async {
     final form = FormData.fromMap({
-      'sessionId': sessionId,
-      'image':     await MultipartFile.fromFile(file.path, filename: 'thumb.jpg'),
+      'session_id': sessionId,
+      'image':      await MultipartFile.fromFile(file.path, filename: 'thumb.jpg'),
     });
     final res = await _dio.post('/api/upload/live', data: form);
-    return res.data['url'] as String;
+    return (res.data as Map<String, dynamic>)['url'] as String;
+  }
+
+  // ── Temp (pre-product-creation) ───────────────────────────────────────────
+
+  /// POST /api/upload/temp — any authenticated user.
+  /// Form: `image`.  Response: `{ url, key }`.
+  ///
+  /// Used by quick-create flows where you upload an image before the product
+  /// row exists. The temp key has no owner association — clean up via a
+  /// scheduled R2 lifecycle rule if you want.
+  Future<String> uploadTempImage(File file) async {
+    final form = FormData.fromMap({
+      'image': await MultipartFile.fromFile(file.path, filename: 'temp.jpg'),
+    });
+    final res = await _dio.post('/api/upload/temp', data: form);
+    return (res.data as Map<String, dynamic>)['url'] as String;
   }
 }
