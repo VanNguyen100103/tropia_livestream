@@ -20,9 +20,12 @@ dependencies:
   video_player: ^2.8.2
   chewie: ^1.7.4
 
-  # Camera
+  # Camera (preview + photo capture)
   camera: ^0.11.0
   permission_handler: ^11.3.1
+
+  # Live streaming — RTMP publish from phone camera to SRS (Shopee Live style)
+  apivideo_live_stream: ^1.2.0
 
   # UI components
   cached_network_image: ^3.3.1
