@@ -1,7 +1,10 @@
 package srs
 
 import (
+	"context"
 	"net/http"
+	"path/filepath"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -16,14 +19,33 @@ import (
 // - on_unpublish: stream ended
 // - on_play:      viewer connected
 // - on_stop:      viewer disconnected
-// - on_dvr:       recording file finished
+// - on_dvr:       recording file finished — triggers FFmpeg remux + R2 upload
+
+// EventPublisher mirrors events.EventBus.
+type EventPublisher interface {
+	Publish(ctx context.Context, eventType string, payload any) error
+}
+
+type noopPublisher struct{}
+
+func (noopPublisher) Publish(context.Context, string, any) error { return nil }
 
 type Handler struct {
-	repo *live.SessionRepository
+	repo   *live.SessionRepository
+	events EventPublisher
 }
 
 func NewHandler(repo *live.SessionRepository) *Handler {
-	return &Handler{repo: repo}
+	return &Handler{repo: repo, events: noopPublisher{}}
+}
+
+// WithEvents wires an event bus so on_dvr can hand recordings off to the
+// background worker for FFmpeg remux + R2 upload.
+func (h *Handler) WithEvents(p EventPublisher) *Handler {
+	if p != nil {
+		h.events = p
+	}
+	return h
 }
 
 func (h *Handler) Register(r *gin.RouterGroup) {
@@ -42,7 +64,9 @@ func (h *Handler) Register(r *gin.RouterGroup) {
 //   "vhost": "__defaultVhost__",
 //   "app": "live",
 //   "stream": "live_abc123",   <-- this is our agora_channel
-//   "param": "?token=xxx"
+//   "param": "?token=xxx",
+//   "file": "./objs/nginx/html/dvr/live/live_abc.1234.flv",  // on_dvr only
+//   "duration": 67                                            // on_dvr only (seconds)
 // }
 type webhookPayload struct {
 	Action   string `json:"action"`
@@ -90,9 +114,43 @@ func (h *Handler) onUnpublish(c *gin.Context) {
 	ok(c)
 }
 
-func (h *Handler) onPlay(c *gin.Context)    { ok(c) }
-func (h *Handler) onStop(c *gin.Context)    { ok(c) }
+func (h *Handler) onPlay(c *gin.Context) { ok(c) }
+func (h *Handler) onStop(c *gin.Context) { ok(c) }
+
+// onDvr — fired by SRS when DVR finishes writing the .flv recording.
+// We publish a `recording.created` event to Redis Streams; the background
+// worker (cmd/worker) picks it up, remuxes FLV → MP4 with FFmpeg, uploads
+// to R2, and updates live_sessions.vod_mp4_url.
 func (h *Handler) onDvr(c *gin.Context) {
-	// TODO: enqueue R2 upload job
+	var p webhookPayload
+	if err := c.ShouldBindJSON(&p); err != nil {
+		ok(c)
+		return
+	}
+
+	// SRS file path is INSIDE the container, e.g.
+	//   ./objs/nginx/html/dvr/live/live_abc.1234.flv
+	// We bind-mount the DVR folder to ./infra/dvr on the host, so strip
+	// the container prefix and the worker can find the file under its
+	// own DVR_HOST_PATH (set via env).
+	relPath := strings.TrimPrefix(p.File, "./objs/nginx/html/dvr/")
+	relPath = strings.TrimPrefix(relPath, "objs/nginx/html/dvr/")
+
+	// Look up the session UUID from the stream key.
+	sess, err := h.repo.GetByChannel(c.Request.Context(), p.Stream)
+	if err != nil {
+		// Recording for an unknown stream — still 200 OK to SRS (file is
+		// still on disk; manual cleanup if needed).
+		ok(c)
+		return
+	}
+
+	_ = h.events.Publish(c.Request.Context(), "recording.created", map[string]any{
+		"session_id":    sess.ID.String(),
+		"stream_key":    p.Stream,
+		"srs_file_path": filepath.ToSlash(relPath), // relative to DVR root
+		"duration_sec":  p.Duration,
+	})
+
 	ok(c)
 }

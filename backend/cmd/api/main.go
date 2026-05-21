@@ -199,7 +199,7 @@ func main() {
 	aiH.Register(router.Group("/api/live"), authMw, sellerMw)
 
 	// SRS webhooks
-	srsH := srs.NewHandler(sessRepo)
+	srsH := srs.NewHandler(sessRepo).WithEvents(bus)
 	srsH.Register(router.Group("/api/srs"))
 
 	// Shops

@@ -147,6 +147,48 @@ func (r *SessionRepository) EndByChannel(ctx context.Context, channel string) er
 	return err
 }
 
+// SetVodURLs records the public URLs of the uploaded VOD after worker
+// finishes FFmpeg remux + R2 upload.
+func (r *SessionRepository) SetVodURLs(ctx context.Context, sessionID uuid.UUID, mp4URL, hlsURL string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_sessions
+		    SET vod_mp4_url = NULLIF($2, ''),
+		        vod_hls_url = NULLIF($3, '')
+		  WHERE id = $1`,
+		sessionID, mp4URL, hlsURL)
+	return err
+}
+
+// InsertRecording logs each recording attempt in the recordings table.
+func (r *SessionRepository) InsertRecording(ctx context.Context, sessionID uuid.UUID, srsFilePath string, durationSec int) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := r.pool.QueryRow(ctx,
+		`INSERT INTO recordings (session_id, srs_file_path, duration_sec, status)
+		 VALUES ($1, $2, NULLIF($3, 0), 'processing')
+		 RETURNING id`,
+		sessionID, srsFilePath, durationSec).Scan(&id)
+	return id, err
+}
+
+func (r *SessionRepository) MarkRecordingUploaded(ctx context.Context, recID uuid.UUID, r2Key string, sizeBytes int64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE recordings
+		    SET r2_key = $2,
+		        file_size_bytes = $3,
+		        status = 'uploaded',
+		        completed_at = NOW()
+		  WHERE id = $1`,
+		recID, r2Key, sizeBytes)
+	return err
+}
+
+func (r *SessionRepository) MarkRecordingFailed(ctx context.Context, recID uuid.UUID, errMsg string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE recordings SET status = 'failed', error_message = $2 WHERE id = $1`,
+		recID, errMsg)
+	return err
+}
+
 func (r *SessionRepository) UpsertViewer(ctx context.Context, sessionID, userID uuid.UUID) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO live_viewers (session_id, user_id) VALUES ($1, $2)

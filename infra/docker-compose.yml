@@ -59,6 +59,8 @@ services:
       - "10080:10080/udp"  # SRT
     volumes:
       - ./srs/srs.conf:/usr/local/srs/conf/srs.conf:ro
+      # Share DVR recordings to host so the Go worker can read + upload to R2.
+      - ./dvr:/usr/local/srs/objs/nginx/html/dvr
     command: ./objs/srs -c conf/srs.conf
     depends_on:
       - postgres
