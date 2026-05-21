@@ -1,4 +1,17 @@
-﻿I now have enough information to produce the comprehensive audit. Let me compile it.
+﻿> **HISTORICAL DOCUMENT.** This file describes the **original Node.js
+> backend** that was ported to Go across Phases 0-20. Kept for parity
+> debugging and to recover the rationale behind quirks. Current
+> production code lives in `cmd/`, `internal/`, `migrations/` — see
+> `backend/README.md` and the top-level `CLAUDE.md`.
+>
+> Things mentioned here that are **NO LONGER** in the running stack:
+> - Cloudinary → replaced by Cloudflare R2 in Phase 9
+> - RabbitMQ → replaced by Redis Streams in Phase 11
+> - Supabase REST/Auth SDK → Go uses pgx + custom JWT auth
+> - Express middleware → Gin equivalents in `internal/httpx/`
+> - LiveKit / Agora → SRS (RTMP/HLS/WHIP/SRT) in Phase 16
+
+I now have enough information to produce the comprehensive audit. Let me compile it.
 
 ---
 
