@@ -73,7 +73,7 @@ func (h *UploadHandler) avatar(c *gin.Context) {
 		c.Error(err)
 		return
 	}
-	key := fmt.Sprintf("avatars/%s%s", uid, extFromCT(ct))
+	key := fmt.Sprintf("images/avatars/%s%s", uid, extFromCT(ct))
 	url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 	if err != nil {
 		c.Error(httpx.NewInternal("r2 upload", err))
@@ -115,7 +115,7 @@ func (h *UploadHandler) product(c *gin.Context) {
 		if ct == "" {
 			continue
 		}
-		key := fmt.Sprintf("products/%s/%d_%d%s", productID, time.Now().UnixNano(), i, ext)
+		key := fmt.Sprintf("images/products/%s/%d_%d%s", productID, time.Now().UnixNano(), i, ext)
 		url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 		if err != nil {
 			continue
@@ -161,7 +161,7 @@ func (h *UploadHandler) variant(c *gin.Context) {
 		if ct == "" {
 			continue
 		}
-		key := fmt.Sprintf("variants/%s/%d_%d%s", variantID, time.Now().UnixNano(), i, ext)
+		key := fmt.Sprintf("images/variants/%s/%d_%d%s", variantID, time.Now().UnixNano(), i, ext)
 		url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 		if err != nil {
 			continue
@@ -182,7 +182,7 @@ func (h *UploadHandler) shop(c *gin.Context) {
 		c.Error(err)
 		return
 	}
-	key := fmt.Sprintf("shops/%s/banner%s", shopID, extFromCT(ct))
+	key := fmt.Sprintf("images/shops/%s/banner%s", shopID, extFromCT(ct))
 	url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 	if err != nil {
 		c.Error(httpx.NewInternal("r2 upload", err))
@@ -202,7 +202,7 @@ func (h *UploadHandler) liveCover(c *gin.Context) {
 		c.Error(err)
 		return
 	}
-	key := fmt.Sprintf("live/%s/cover%s", sessionID, extFromCT(ct))
+	key := fmt.Sprintf("images/live-covers/%s/cover%s", sessionID, extFromCT(ct))
 	url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 	if err != nil {
 		c.Error(httpx.NewInternal("r2 upload", err))
@@ -219,7 +219,7 @@ func (h *UploadHandler) temp(c *gin.Context) {
 		c.Error(err)
 		return
 	}
-	key := fmt.Sprintf("temp/%s/%d%s", uid, time.Now().UnixNano(), extFromCT(ct))
+	key := fmt.Sprintf("images/temp/%s/%d%s", uid, time.Now().UnixNano(), extFromCT(ct))
 	url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 	if err != nil {
 		c.Error(httpx.NewInternal("r2 upload", err))

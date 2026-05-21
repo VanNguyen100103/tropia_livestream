@@ -1,8 +1,7 @@
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 
+import 'package:tropia/features/live/data/live_repository.dart';
 import 'package:tropia/features/live/models/live_stream_model.dart';
-import 'package:tropia/features/live/services/srs_service.dart';
 import 'package:tropia/features/live/widgets/rtmp_publish_info.dart';
 
 /// MVP host screen for SRS-based live streaming.
@@ -32,36 +31,29 @@ class LiveHostScreen extends StatefulWidget {
 }
 
 class _LiveHostScreenState extends State<LiveHostScreen> {
-  StreamInfo? _session;
+  Map<String, dynamic>? _session;
   PublishURLs? _publish;
   String? _error;
   bool _loading = true;
 
-  late final SrsService _srs;
-
   @override
   void initState() {
     super.initState();
-    _srs = SrsService(dio: _buildDio());
     _createStream();
-  }
-
-  Dio _buildDio() {
-    // TODO: inject from app-wide Dio (with auth interceptor)
-    return Dio(BaseOptions(baseUrl: 'http://10.0.2.2:3000'));
   }
 
   Future<void> _createStream() async {
     try {
-      final res = await _srs.createStream(
-        title: widget.title,
-        category: widget.category,
+      final res = await LiveRepository.instance.startLive(
+        title:         widget.title,
+        category:      widget.category,
         coverImageUrl: widget.thumbnailUrl,
       );
       if (!mounted) return;
       setState(() {
-        _session = res.session;
-        _publish = res.publish;
+        _session = res['session'] as Map<String, dynamic>?;
+        final publishJson = res['publish'] as Map<String, dynamic>?;
+        _publish = publishJson != null ? PublishURLs.fromJson(publishJson) : null;
         _loading = false;
       });
     } catch (e) {
@@ -74,12 +66,13 @@ class _LiveHostScreenState extends State<LiveHostScreen> {
   }
 
   Future<void> _endStream() async {
-    if (_session == null) {
+    final sessionId = _session?['id'] as String?;
+    if (sessionId == null) {
       Navigator.of(context).pop();
       return;
     }
     try {
-      await _srs.endStream(_session!.id);
+      await LiveRepository.instance.endLive(sessionId);
     } catch (_) {}
     if (mounted) Navigator.of(context).pop();
   }
@@ -129,12 +122,16 @@ class _LiveHostScreenState extends State<LiveHostScreen> {
         ),
       );
     }
+    final session = _session;
+    final sessionId = session?['id'] as String? ?? '';
+    final sessionTitle = session?['title'] as String? ?? '-';
+    final sessionStatus = session?['status'] as String? ?? '-';
     return SingleChildScrollView(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (_publish != null && _session != null)
-            RtmpPublishInfo(publish: _publish!, streamId: _session!.id),
+          if (_publish != null && sessionId.isNotEmpty)
+            RtmpPublishInfo(publish: _publish!, streamId: sessionId),
           const Divider(height: 32),
           Padding(
             padding: const EdgeInsets.all(16),
@@ -142,12 +139,12 @@ class _LiveHostScreenState extends State<LiveHostScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Stream: ${_session?.title ?? '-'}',
+                  'Stream: $sessionTitle',
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Trạng thái: ${_session?.status ?? '-'}',
+                  'Trạng thái: $sessionStatus',
                   style: const TextStyle(color: Colors.black54),
                 ),
                 const SizedBox(height: 4),

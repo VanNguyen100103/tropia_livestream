@@ -199,6 +199,77 @@ func (r *ProductRepository) SoftDelete(ctx context.Context, id uuid.UUID) error 
 	return err
 }
 
+// AttributeType represents one variant axis (Color, Size, Weight, ...)
+// with its allowed values.
+type AttributeType struct {
+	ID        uuid.UUID         `json:"id"`
+	Name      string            `json:"name"`
+	SortOrder int               `json:"sort_order"`
+	Values    []AttributeValue  `json:"values"`
+}
+
+type AttributeValue struct {
+	ID          uuid.UUID `json:"id"`
+	Value       string    `json:"value"`
+	DisplayName *string   `json:"display_name,omitempty"`
+	ColorHex    *string   `json:"color_hex,omitempty"`
+	SortOrder   int       `json:"sort_order"`
+}
+
+// ListAttributes returns every attribute_type together with its values,
+// sorted by sort_order then name. Used by the variant picker UI.
+func (r *ProductRepository) ListAttributes(ctx context.Context) ([]AttributeType, error) {
+	const q = `
+		SELECT t.id, t.name, t.sort_order,
+		       v.id, v.value, v.display_name, v.color_hex, v.sort_order
+		FROM attribute_types t
+		LEFT JOIN attribute_values v ON v.attribute_type_id = t.id
+		ORDER BY t.sort_order, t.name, v.sort_order, v.value
+	`
+	rows, err := r.pool.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byID := map[uuid.UUID]*AttributeType{}
+	var order []uuid.UUID
+	for rows.Next() {
+		var (
+			tID   uuid.UUID
+			tName string
+			tOrd  int
+			vID   *uuid.UUID
+			vVal  *string
+			vDisp *string
+			vHex  *string
+			vOrd  *int
+		)
+		if err := rows.Scan(&tID, &tName, &tOrd, &vID, &vVal, &vDisp, &vHex, &vOrd); err != nil {
+			return nil, err
+		}
+		t, ok := byID[tID]
+		if !ok {
+			t = &AttributeType{ID: tID, Name: tName, SortOrder: tOrd, Values: []AttributeValue{}}
+			byID[tID] = t
+			order = append(order, tID)
+		}
+		if vID != nil {
+			t.Values = append(t.Values, AttributeValue{
+				ID: *vID, Value: *vVal, DisplayName: vDisp, ColorHex: vHex, SortOrder: *vOrd,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]AttributeType, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out, nil
+}
+
 func (r *ProductRepository) AssertOwner(ctx context.Context, productID, sellerID uuid.UUID) (bool, error) {
 	var n int
 	err := r.pool.QueryRow(ctx,
@@ -274,13 +345,21 @@ func NewProductHandler(repo *ProductRepository, shopResolver SimpleShopResolver,
 }
 
 func (h *ProductHandler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc) {
+	// IMPORTANT: register specific paths BEFORE the `/:slug` wildcard,
+	// otherwise Gin's tree treats "attributes" / "shop" / "seller" as a slug.
 	r.GET("", h.browse)
-	r.GET("/:slug", h.getBySlug)
+	r.GET("/attributes", h.attributes)
+	r.GET("/shop/:shopId", h.byShop)
 
-	seller := r.Group("/", authMw, sellerMw)
-	seller.POST("/quick-create", h.quickCreate)
-	seller.PATCH("/:id/status", h.updateStatus)
-	seller.DELETE("/:id", h.softDelete)
+	// Authenticated seller routes — also need to be registered before /:slug
+	sellerGroup := r.Group("/", authMw, sellerMw)
+	sellerGroup.GET("/seller/list", h.sellerList)
+	sellerGroup.POST("/quick-create", h.quickCreate)
+	sellerGroup.PATCH("/:id/status", h.updateStatus)
+	sellerGroup.DELETE("/:id", h.softDelete)
+
+	// Catch-all slug route LAST
+	r.GET("/:slug", h.getBySlug)
 }
 
 func (h *ProductHandler) browse(c *gin.Context) {
@@ -408,4 +487,87 @@ func (h *ProductHandler) softDelete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// sellerList — GET /api/products/seller/list?status=&page=&limit=
+// Returns the authenticated seller's own products. Reuses Browse() with a
+// shop filter resolved from the JWT.
+func (h *ProductHandler) sellerList(c *gin.Context) {
+	claims, _ := auth.ClaimsFrom(c)
+	sellerID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		c.Error(httpx.NewAuth("invalid token"))
+		return
+	}
+	shop, err := h.shops.FindBySellerID(c.Request.Context(), sellerID)
+	if err != nil {
+		// Seller without a shop yet → return empty list (not an error).
+		c.JSON(http.StatusOK, gin.H{
+			"data":       []any{},
+			"pagination": gin.H{"page": 1, "limit": 20, "total": 0},
+		})
+		return
+	}
+	shopID := shop.GetID()
+	f := BrowseFilters{ShopID: &shopID}
+	if v, err := strconv.Atoi(c.Query("page")); err == nil {
+		f.Page = v
+	}
+	if v, err := strconv.Atoi(c.Query("limit")); err == nil {
+		f.Limit = v
+	}
+	products, total, err := h.repo.Browse(c.Request.Context(), f)
+	if err != nil {
+		c.Error(httpx.NewInternal("seller list", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data": products,
+		"pagination": gin.H{
+			"page":  f.Page,
+			"limit": f.Limit,
+			"total": total,
+		},
+	})
+}
+
+// byShop — GET /api/products/shop/:shopId?page=&limit=
+// Public: list active products of a specific shop.
+func (h *ProductHandler) byShop(c *gin.Context) {
+	shopID, err := uuid.Parse(c.Param("shopId"))
+	if err != nil {
+		c.Error(httpx.NewValidation("invalid shop id", nil))
+		return
+	}
+	f := BrowseFilters{ShopID: &shopID}
+	if v, err := strconv.Atoi(c.Query("page")); err == nil {
+		f.Page = v
+	}
+	if v, err := strconv.Atoi(c.Query("limit")); err == nil {
+		f.Limit = v
+	}
+	products, total, err := h.repo.Browse(c.Request.Context(), f)
+	if err != nil {
+		c.Error(httpx.NewInternal("by shop", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data": products,
+		"pagination": gin.H{
+			"page":  f.Page,
+			"limit": f.Limit,
+			"total": total,
+		},
+	})
+}
+
+// attributes — GET /api/products/attributes
+// Returns all attribute types with their values, used by the variant picker UI.
+func (h *ProductHandler) attributes(c *gin.Context) {
+	rows, err := h.repo.ListAttributes(c.Request.Context())
+	if err != nil {
+		c.Error(httpx.NewInternal("list attributes", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"attribute_types": rows})
 }

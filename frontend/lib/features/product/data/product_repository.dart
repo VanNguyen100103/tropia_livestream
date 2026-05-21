@@ -86,10 +86,15 @@ class ProductRepository {
     return (items: items, total: total.toInt());
   }
 
-  /// GET /api/products/attributes
+  /// GET /api/products/attributes → { attribute_types: [{ id, name, values: [...] }, ...] }
   Future<List<dynamic>> getAttributes() async {
     final res = await _public.get('/api/products/attributes');
-    return res.data as List;
+    final body = res.data;
+    if (body is List) return body; // legacy shape
+    if (body is Map<String, dynamic>) {
+      return (body['attribute_types'] as List?) ?? const [];
+    }
+    return const [];
   }
 
   // ── Upload ────────────────────────────────────────────────────────────────
@@ -109,7 +114,8 @@ class ProductRepository {
 
   // ── Mutate (seller/admin) ─────────────────────────────────────────────────
 
-  /// POST /api/products/quick-create — tạo nhanh sản phẩm trong buổi live
+  /// POST /api/products/quick-create — tạo nhanh sản phẩm trong buổi live.
+  /// Go backend expects snake_case + integer price (VND).
   Future<ProductModel> quickCreate({
     required String name,
     String? description,
@@ -119,13 +125,16 @@ class ProductRepository {
   }) async {
     final res = await _dio.post('/api/products/quick-create', data: {
       'name':        name,
-      'description': description,
-      'price':       price,
+      if (description != null && description.isNotEmpty) 'description': description,
+      'price':       price.toInt(),  // Go expects int (VND)
       'stock':       stock,
-      if (imageUrl != null) 'imageUrl': imageUrl,
+      if (imageUrl != null && imageUrl.isNotEmpty) 'image_url': imageUrl,
     });
-    AppLogger.logInfo(_tag, 'Quick product created: ${res.data['id']}');
-    return ProductModel.fromJson(res.data as Map<String, dynamic>);
+    final body = res.data as Map<String, dynamic>;
+    // Go returns { product: {...} }, not the product directly.
+    final product = (body['product'] as Map<String, dynamic>?) ?? body;
+    AppLogger.logInfo(_tag, 'Quick product created: ${product['id']}');
+    return ProductModel.fromJson(product);
   }
 
   /// POST /api/products

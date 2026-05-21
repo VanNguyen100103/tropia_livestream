@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../services/srs_service.dart';
+import '../models/live_stream_model.dart';
 
 /// Displays publish URLs (RTMP/WHIP/SRT) the seller can use to push their
 /// stream to SRS from OBS, Streamlabs, Larix Broadcaster, or another tool.

@@ -670,7 +670,7 @@ class LiveStream {
   /// URL thumbnail (ảnh xem trước khi chưa vào)
   final String thumbnailUrl;
 
-  /// URL video stream (HLS m3u8 from SRS) — populated by SrsService.getPlayback().
+  /// URL video stream (HLS m3u8 from SRS) — populated by LiveRepository.fetchPlayback().
   final String? streamUrl;
 
   /// Trạng thái: live / ended / upcoming
@@ -828,4 +828,37 @@ class LiveStream {
 
   /// Kiểm tra đang phát live
   bool get isLive => status == StreamStatus.live;
+}
+
+// ─── SRS publish / playback URL bundles ──────────────────────────────────────
+// Returned by the Go backend's POST /api/live/streams (publish) and
+// GET /api/live/streams/:id/playback endpoints. Used by RtmpPublishInfo
+// widget and HlsViewer.
+
+class PublishURLs {
+  final String rtmp;
+  final String whip;
+  final String srt;
+
+  const PublishURLs({required this.rtmp, required this.whip, required this.srt});
+
+  factory PublishURLs.fromJson(Map<String, dynamic> json) => PublishURLs(
+        rtmp: json['rtmp'] as String? ?? '',
+        whip: json['whip'] as String? ?? '',
+        srt:  json['srt']  as String? ?? '',
+      );
+}
+
+class PlaybackURLs {
+  final String hls;
+  final String flv;
+  final String whep;
+
+  const PlaybackURLs({required this.hls, required this.flv, required this.whep});
+
+  factory PlaybackURLs.fromJson(Map<String, dynamic> json) => PlaybackURLs(
+        hls:  json['hls']  as String? ?? '',
+        flv:  json['flv']  as String? ?? '',
+        whep: json['whep'] as String? ?? '',
+      );
 }

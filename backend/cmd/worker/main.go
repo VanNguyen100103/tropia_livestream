@@ -256,7 +256,15 @@ func handlePaymentSuccess(emailer *notify.Email, log *slog.Logger) events.Handle
 			log.Info("payment success (no email)", "order_id", ev.OrderID)
 			return nil
 		}
-		subject, body := notify.TmplPaymentSuccess(ev.Name, ev.OrderID, ev.Method, ev.Amount)
+		subject, body := notify.TmplPaymentSuccess(notify.PaymentSuccessInput{
+			Name:          ev.Name,
+			OrderID:       ev.OrderID,
+			Method:        ev.Method,
+			TransactionID: ev.TransID,
+			TotalPrice:    ev.Amount,
+			// Items/DiscountAmount left empty for now — fill when payment
+			// event publisher includes line items (TODO in commerce.OrderService).
+		})
 		if err := emailer.Send(ev.Email, subject, body); err != nil {
 			log.Warn("payment email failed", "to", ev.Email, "err", err)
 			return err

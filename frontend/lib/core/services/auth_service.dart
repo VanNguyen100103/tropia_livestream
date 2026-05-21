@@ -95,14 +95,15 @@ class AuthService extends ChangeNotifier {
     String? phone,
     String? shopName,
   }) async {
+    // Go backend uses snake_case keys (see internal/auth/handler.go registerReq).
     final body = <String, dynamic>{
       'email':    email,
       'password': password,
-      'fullName': name,
+      'name':     name,
       'role':     role,
     };
     if (phone != null) body['phone'] = phone;
-    if (shopName != null) body['shopName'] = shopName;
+    if (shopName != null) body['shop_name'] = shopName;
     final res = await _dio.post('/api/auth/register', data: body);
     // Register không tự đăng nhập, gọi login sau
     AppLogger.logInfo(_tag, 'Registered: ${res.data['user']['email']}');
@@ -117,9 +118,11 @@ class AuthService extends ChangeNotifier {
     });
 
     final data = res.data as Map<String, dynamic>;
+    // Go backend returns snake_case (access_token, refresh_token).
+    // Keep camelCase fallbacks for transition / older builds.
     await _saveSession(
-      accessToken:  data['accessToken'] as String,
-      refreshToken: data['refreshToken'] as String?,
+      accessToken:  (data['access_token']  ?? data['accessToken'])  as String,
+      refreshToken: (data['refresh_token'] ?? data['refreshToken']) as String?,
       userMap:      data['user'] as Map<String, dynamic>,
     );
     AppLogger.logInfo(_tag, 'Logged in: ${_user?.email}');
@@ -157,7 +160,7 @@ class AuthService extends ChangeNotifier {
       final res = await _dio.get('/api/auth/google/exchange', queryParameters: {'code': code});
       final data = res.data as Map<String, dynamic>;
 
-      final accessToken = data['accessToken'] as String;
+      final accessToken = (data['access_token'] ?? data['accessToken']) as String;
 
       // Decode JWT payload để lấy user info
       final parts   = accessToken.split('.');
@@ -227,8 +230,8 @@ class AuthService extends ChangeNotifier {
 
   Future<void> resetPassword({required String token, required String newPassword}) async {
     await _dio.post('/api/auth/reset-password', data: {
-      'token':       token,
-      'newPassword': newPassword,
+      'token':        token,
+      'new_password': newPassword,  // Go backend uses snake_case
     });
   }
 
@@ -254,14 +257,19 @@ class AuthService extends ChangeNotifier {
   Future<bool> _tryRefresh() async {
     if (_refreshToken == null) return false;
     try {
+      // Go backend: POST /api/auth/refresh { refresh_token } → { access_token, refresh_token }
+      // Refresh response doesn't include user — keep existing _user.
       final res = await _dio.post('/api/auth/refresh', data: {
-        'refreshToken': _refreshToken,
+        'refresh_token': _refreshToken,
       });
       final data = res.data as Map<String, dynamic>;
       await _saveSession(
-        accessToken:  data['accessToken'] as String,
-        refreshToken: data['refreshToken'] as String?,
-        userMap:      data['user'] as Map<String, dynamic>,
+        accessToken:  (data['access_token']  ?? data['accessToken'])  as String,
+        refreshToken: (data['refresh_token'] ?? data['refreshToken']) as String?,
+        userMap: (data['user'] as Map<String, dynamic>?) ??
+                 (_user != null
+                     ? {'id': _user!.id, 'email': _user!.email, 'name': _user!.name, 'role': _user!.role}
+                     : <String, dynamic>{}),
       );
       return true;
     } catch (e) {
