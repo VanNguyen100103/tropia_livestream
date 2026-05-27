@@ -2,6 +2,7 @@
 // checkout_screen.dart – Màn hình thanh toán Tropia
 // =============================================================================
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -113,8 +114,22 @@ class _CheckoutScreenState extends State<CheckoutScreen>
     setState(() => _placing = true);
     try {
       final cart = context.read<CartProvider>();
-      final couponCode = cart.platformCoupon?.coupon.code;
+      // Gom tất cả voucher đang áp (platform + shop) để BE validate và sum
+      // discount đồng nhất với FE. Trước đây chỉ gửi platformCoupon → shop
+      // voucher bị mất, MoMo charge full subtotal trong khi FE show đã giảm.
+      final couponCodes = <String>[
+        if (cart.platformCoupon != null) cart.platformCoupon!.coupon.code,
+        for (final applied in cart.shopCoupons.values) applied.coupon.code,
+      ];
       final note = _noteCtrl.text.trim();
+
+      // Tab "Nhận tại cửa hàng" không có địa chỉ giao — gửi null để
+      // backend lưu NULL vào shipping_* và email biên lai bỏ qua block
+      // địa chỉ. Tab "Giao hàng" thì gửi snapshot từ _selectedAddress.
+      final bool isDelivery = _mode == _FulfillmentMode.delivery;
+      final String? shipName    = isDelivery ? _selectedAddress.name    : null;
+      final String? shipPhone   = isDelivery ? _selectedAddress.phone   : null;
+      final String? shipAddress = isDelivery ? _selectedAddress.address : null;
 
       // Gọi endpoint /api/orders/checkout (hỗ trợ cả live và cart thường)
       final result = await OrderRepository.instance.checkout(
@@ -126,29 +141,31 @@ class _CheckoutScreenState extends State<CheckoutScreen>
           productName: item.productName,
           sessionId:   widget.liveSessionId,
         )).toList(),
-        couponCode:     couponCode,
-        discountAmount: cart.totalCouponDiscount,
-        paymentMethod:  _payMethod.name,
-        note:           note.isEmpty ? null : note,
+        couponCodes:     couponCodes,
+        discountAmount:  cart.totalCouponDiscount,
+        paymentMethod:   _payMethod.name,
+        note:            note.isEmpty ? null : note,
+        shippingName:    shipName,
+        shippingPhone:   shipPhone,
+        shippingAddress: shipAddress,
       );
 
       final orders = result.orders;
 
-      // Online payment
+      // Online payment: KHÔNG xoá items lúc tạo đơn. Backend cũng giữ
+      // cart_items lại cho đến khi gateway IPN/callback xác nhận paid
+      // (MarkPaid sẽ xoá). Nếu thanh toán fail/cancel/đóng app → giỏ
+      // còn nguyên, buyer có thể thử lại.
       if (_payMethod != _PayMethod.cod && orders.isNotEmpty) {
-        // Xoá items khỏi giỏ ngay sau khi order được tạo thành công
-        for (final item in widget.items) {
-          await cart.removeItem(item.id);
-        }
-        cart.removePlatformCoupon();
         await _initiateOnlinePayment(orders.first);
         return;
       }
 
-      // COD → xoá items đã mua khỏi giỏ
+      // COD → đơn đã commit ngay → xoá items khỏi giỏ (mirror backend).
       for (final item in widget.items) {
         await cart.removeItem(item.id);
       }
+      cart.removePlatformCoupon();
 
       if (mounted) {
         Navigator.of(context).pushReplacement(
@@ -172,13 +189,64 @@ class _CheckoutScreenState extends State<CheckoutScreen>
       );
     } catch (e, st) {
       AppLogger.logError(_tag, 'placeOrder failed', e, st);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Đặt hàng thất bại: ${e.toString()}')),
-        );
-      }
+      if (!mounted) return;
+      final msg = _explainCheckoutError(e);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     } finally {
       if (mounted) setState(() => _placing = false);
+    }
+  }
+
+  /// Dịch lỗi checkout sang tiếng Việt thân thiện và tự gỡ voucher hỏng.
+  ///
+  /// Backend [ApplyCoupon] trả 422 `VALIDATION_ERROR` với
+  /// `details = {coupon_code, reason}` cho mọi lỗi voucher (limit_reached,
+  /// expired, inactive, already_used, min_order, not_found). Khi gặp lỗi
+  /// voucher, ta vừa show thông báo cụ thể vừa gỡ luôn voucher đang áp khỏi
+  /// CartProvider để lần checkout sau không lặp lại lỗi.
+  String _explainCheckoutError(Object err) {
+    if (err is! DioException) return 'Đặt hàng thất bại: $err';
+    final data = err.response?.data;
+    if (data is! Map) return 'Đặt hàng thất bại, vui lòng thử lại';
+
+    final details = data['details'];
+    if (details is Map && details['coupon_code'] is String) {
+      final code = details['coupon_code'] as String;
+      final reason = details['reason'] as String? ?? '';
+      _unapplyCoupon(code);
+      switch (reason) {
+        case 'limit_reached':
+          return 'Mã giảm giá $code đã hết lượt sử dụng. Voucher đã được gỡ khỏi đơn — vui lòng đặt lại.';
+        case 'expired':
+          return 'Mã giảm giá $code đã hết hạn. Voucher đã được gỡ khỏi đơn — vui lòng đặt lại.';
+        case 'inactive':
+          return 'Mã giảm giá $code đã ngừng áp dụng. Voucher đã được gỡ khỏi đơn — vui lòng đặt lại.';
+        case 'already_used':
+          return 'Bạn đã sử dụng mã $code trước đó. Voucher đã được gỡ khỏi đơn — vui lòng đặt lại.';
+        case 'min_order':
+          return 'Đơn chưa đạt giá trị tối thiểu để dùng mã $code. Voucher đã được gỡ khỏi đơn.';
+        case 'not_found':
+          return 'Mã giảm giá $code không tồn tại. Voucher đã được gỡ khỏi đơn.';
+      }
+    }
+
+    final raw = (data['error'] ?? data['message']) as String?;
+    return raw != null && raw.isNotEmpty
+        ? 'Đặt hàng thất bại: $raw'
+        : 'Đặt hàng thất bại, vui lòng thử lại';
+  }
+
+  void _unapplyCoupon(String code) {
+    final cart = context.read<CartProvider>();
+    if (cart.platformCoupon?.coupon.code == code) {
+      cart.removePlatformCoupon();
+      return;
+    }
+    for (final entry in cart.shopCoupons.entries) {
+      if (entry.value.coupon.code == code) {
+        cart.removeShopCoupon(entry.key);
+        return;
+      }
     }
   }
 

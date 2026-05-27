@@ -12,6 +12,7 @@ import 'package:tropia/core/utils/logger.dart';
 import 'package:tropia/features/cart/data/cart_repository.dart';
 import 'package:tropia/features/shop/data/shop_repository.dart';
 import 'package:tropia/features/live/data/live_repository.dart';
+import 'package:tropia/features/live/data/live_socket.dart';
 import 'package:tropia/features/live/models/live_stream_model.dart';
 import 'package:tropia/features/live/services/chat_command_parser.dart';
 import 'package:tropia/features/live/services/ai_suggestion_service.dart';
@@ -31,12 +32,22 @@ class LiveProvider extends ChangeNotifier {
   String? _activeVoucherPopupId;
   String? _floatingVoucherId;
   final Map<String, int> _liveCart = {};
+  // cart_items.id of every item this user added during the CURRENT live
+  // session. Used by the floating mini-cart bag to filter the global cart
+  // down to "things from this live". Cleared on stream switch/leave so a
+  // viewer who hops to another live doesn't see stale items in the bag.
+  final Set<String> _liveSessionCartItemIds = {};
   List<String> _aiSuggestions = [];
   bool _isSuggestionsLoading = false;
 
-  // ─── Polling timers ───────────────────────────────────────────────────────
-  Timer? _chatTimer;
-  Timer? _statsTimer;
+  // ─── Realtime channels (chat + stats per-session, list platform-wide) ─────
+  // Per-session WS push covers chat + stats events. The platform-wide
+  // WS pushes a tiny "list_change" ping whenever a host creates / ends
+  // / re-pins a session — the client then re-fetches /streams once.
+  // Replaces all three polling timers (3s/5s/15s); only one-shot REST
+  // calls remain for bootstrap + reconnect gap recovery.
+  LiveSocket? _socket;
+  LiveListSocket? _listSocket;
   String? _pollingSessionId;
 
   // Callback để live_stream_screen xử lý khi host kết thúc live
@@ -60,6 +71,7 @@ class LiveProvider extends ChangeNotifier {
   String? get activeVoucherPopupId => _activeVoucherPopupId;
   Map<String, int> get liveCart => Map.unmodifiable(_liveCart);
   int get liveCartItemCount => _liveCart.values.fold(0, (s, q) => s + q);
+  Set<String> get liveSessionCartItemIds => Set.unmodifiable(_liveSessionCartItemIds);
   List<String> get aiSuggestions => List.unmodifiable(_aiSuggestions);
   bool get isSuggestionsLoading => _isSuggestionsLoading;
   String? get floatingVoucherId => _floatingVoucherId;
@@ -72,10 +84,17 @@ class LiveProvider extends ChangeNotifier {
         return _streams.where((s) => s.status == StreamStatus.live).toList();
       case LiveTab.video:
         return _streams.where((s) => s.status == StreamStatus.ended).toList();
-      case LiveTab.forYou:
-        final live  = _streams.where((s) => s.status == StreamStatus.live).toList();
-        final ended = _streams.where((s) => s.status != StreamStatus.live).toList();
-        return [...live, ...ended];
+      case LiveTab.following:
+        // Followed shops only — live first, then ended so the buyer can
+        // jump into a current broadcast or replay one they missed.
+        final followed = _streams.where((s) => s.isFollowing).toList();
+        followed.sort((a, b) {
+          final aLive = a.status == StreamStatus.live ? 0 : 1;
+          final bLive = b.status == StreamStatus.live ? 0 : 1;
+          if (aLive != bLive) return aLive.compareTo(bLive);
+          return b.viewerCount.compareTo(a.viewerCount);
+        });
+        return followed;
     }
   }
 
@@ -83,10 +102,25 @@ class LiveProvider extends ChangeNotifier {
 
   LiveProvider() {
     _loadStreams();
+    // Subscribe to the global list_change push. On every event, run a
+    // single REST refresh (the backend coalesces concurrent loads via
+    // its 3s Redis cache, so the burst doesn't fan out to Postgres).
+    _listSocket = LiveListSocket()
+      ..onChange = () {
+        // Debounce isn't strictly needed — backend cache absorbs
+        // bursts — but skip if a refresh is already in flight.
+        if (_refreshing) return;
+        refresh();
+      }
+      ..connect();
   }
+
+  bool _refreshing = false;
 
   @override
   void dispose() {
+    _listSocket?.close();
+    _listSocket = null;
     _stopPolling();
     AiSuggestionService.instance.dispose();
     super.dispose();
@@ -99,19 +133,35 @@ class LiveProvider extends ChangeNotifier {
     _errorMessage = null;
     notifyListeners();
     try {
+      // Cache gives us something to render immediately, but its
+      // `isFollowing` snapshot may be stale (the user could have followed
+      // a shop from a different screen since last load). Fetch the live
+      // follow set first and re-enrich the cached streams before showing
+      // them — that way the "+ Theo dõi" pill doesn't flash on shops the
+      // user already follows.
       await _loadStreamsFromCache();
-      // Fetch streams và followed shop IDs song song
-      final rowsFuture      = LiveRepository.instance.fetchLiveSessions();
-      final followedFuture  = ShopRepository.instance.getFollowedShopIds();
-      final rows       = await rowsFuture;
+      final followedFuture = ShopRepository.instance.getFollowedShopIds();
+      final rowsFuture     = LiveRepository.instance.fetchLiveSessions();
+
+      // Apply the follow set to whatever the cache gave us first, so the
+      // first frame is correct.
       final followedIds = await followedFuture;
-      if (rows.isEmpty) {
+      if (_streams.isNotEmpty) {
+        _streams = _enrichFollowStatus(_streams, followedIds);
+        notifyListeners();
+      }
+
+      // Then merge in the fresh server data.
+      final rows  = await rowsFuture;
+      final fresh = rows.map(_rowToLiveStream).toList();
+      _streams = _enrichFollowStatus(
+        fresh.map(_mergeWithExisting).toList(),
+        followedIds,
+      );
+      if (_streams.isEmpty) {
         AppLogger.logInfo(_tag, 'API returned no streams');
-        if (_streams.isEmpty) {
-          _errorMessage = 'Không có buổi live nào';
-        }
+        _errorMessage = 'Không có buổi live nào';
       } else {
-        _streams = _enrichFollowStatus(rows.map(_rowToLiveStream).toList(), followedIds);
         await _saveStreamsToCache();
         AppLogger.logInfo(_tag, 'Loaded ${_streams.length} live sessions');
       }
@@ -127,30 +177,67 @@ class LiveProvider extends ChangeNotifier {
   }
 
   Future<void> refresh() async {
+    if (_refreshing) return;
+    _refreshing = true;
     try {
       final rowsFuture     = LiveRepository.instance.fetchLiveSessions();
       final followedFuture = ShopRepository.instance.getFollowedShopIds();
       final rows       = await rowsFuture;
       final followedIds = await followedFuture;
-      if (rows.isNotEmpty) {
-        _streams = _enrichFollowStatus(rows.map(_rowToLiveStream).toList(), followedIds);
-        _errorMessage = null;
-        await _saveStreamsToCache();
-        AppLogger.logInfo(_tag, 'Refreshed ${_streams.length} live sessions');
-      } else {
-        _errorMessage = 'Không có buổi live nào';
-      }
+      // Always overwrite _streams with what the server returned, including
+      // the empty case (so ended sessions disappear from the card list).
+      // BUT: merge per-stream so we don't wipe `products`, `vouchers`,
+      // `comments` — the /streams list endpoint only returns session meta,
+      // not the deep data fetched separately by openStream(). Without this
+      // merge, the 15s auto-refresh would blank the viewer mid-watch
+      // (products + chat + vouchers all gone until openStream re-runs).
+      final fresh = rows.map(_rowToLiveStream).toList();
+      _streams = _enrichFollowStatus(
+        fresh.map(_mergeWithExisting).toList(),
+        followedIds,
+      );
+      _errorMessage = _streams.isEmpty ? 'Không có buổi live nào' : null;
+      await _saveStreamsToCache();
+      AppLogger.logInfo(_tag, 'Refreshed ${_streams.length} live sessions');
     } catch (e, st) {
       AppLogger.logError(_tag, 'Refresh failed', e, st);
       _errorMessage = 'Refresh thất bại. Vui lòng thử lại.';
     } finally {
+      _refreshing = false;
       notifyListeners();
     }
   }
 
-  /// Enrich isFollowing cho từng stream dựa vào shopId hoặc sellerId
+  /// Preserves data fields loaded by openStream() (products, vouchers,
+  /// comments, isLiked, isFollowing) when the lightweight /streams list
+  /// poll comes back with only session meta. Falls through to the fresh
+  /// row when there's no in-memory copy yet.
+  LiveStream _mergeWithExisting(LiveStream fresh) {
+    final idx = _streams.indexWhere((s) => s.id == fresh.id);
+    if (idx == -1) return fresh;
+    final old = _streams[idx];
+    // Always trust the server for products now that /streams returns
+    // them inline. Preserving `old.products` when fresh was empty used
+    // to mask host edits — the buyer card stuck on the old list until
+    // they re-entered the viewer. Comments + isLiked + isFollowing stay
+    // local because they're not in the list payload yet.
+    return fresh.copyWith(
+      vouchers: fresh.vouchers.isEmpty ? old.vouchers : fresh.vouchers,
+      comments: old.comments,
+      isLiked: old.isLiked,
+      isFollowing: old.isFollowing,
+    );
+  }
+
+  /// Enrich isFollowing cho từng stream dựa vào shopId hoặc sellerId.
+  ///
+  /// If the user isn't signed in there's nothing to enrich; bail so we
+  /// don't blow away any client-side optimistic state. If they ARE signed
+  /// in we trust the server set even when it's empty — that's the case
+  /// where the user just unfollowed everyone and the pill must flip back
+  /// to "+ Theo dõi".
   List<LiveStream> _enrichFollowStatus(List<LiveStream> streams, Set<String> followedShopIds) {
-    if (followedShopIds.isEmpty) return streams;
+    if (!AuthService.instance.isSignedIn) return streams;
     return streams.map((s) {
       final followed = (s.shopId != null && followedShopIds.contains(s.shopId)) ||
           followedShopIds.contains(s.sellerId);
@@ -177,8 +264,15 @@ class LiveProvider extends ChangeNotifier {
       id:              row['id'] as String,
       sellerId:        row['seller_id'] as String,
       shopId:          row['shop_id'] as String?,
-      sellerName:      (row['seller_name'] ?? row['shop_name'] ?? 'Người bán') as String,
-      sellerAvatarUrl: (row['seller_avatar'] ?? row['avatar_url'] ?? AppUrls.placeholderAvatar) as String,
+      // Preview HLS URL injected by /streams so list cards can auto-play
+      // muted previews without exposing the raw stream_key.
+      streamUrl:       row['playback_hls'] as String?,
+      // Prefer shop_name over the seller's personal profile name — viewers
+      // see the business identity ("Shop của A"), not the owner's full name
+      // ("Nguyễn Văn A"). Falls back to seller_name only when the seller
+      // hasn't set up a shop yet.
+      sellerName:      (row['shop_name'] ?? row['seller_name'] ?? 'Người bán') as String,
+      sellerAvatarUrl: (row['shop_logo_url'] ?? row['seller_avatar'] ?? row['avatar_url'] ?? AppUrls.placeholderAvatar) as String,
       isVerified:      false,
       title:           row['title'] as String,
       description:     (row['description'] as String?) ?? '$category – Live shopping',
@@ -198,6 +292,13 @@ class LiveProvider extends ChangeNotifier {
       vouchers: const [],
       products: products,
       comments: const [],
+      // Backend stores a single pinned product (Shopee Live "GẶP LÊN").
+      // The model historically holds a list to allow future multi-pin —
+      // wrap the scalar into a 1-element list so the rest of the code
+      // path (`pinnedProductIds.contains(...)`) keeps working.
+      pinnedProductIds: row['pinned_product_id'] is String
+          ? [row['pinned_product_id'] as String]
+          : const [],
     );
   }
 
@@ -237,6 +338,29 @@ class LiveProvider extends ChangeNotifier {
     );
   }
 
+  LiveVoucher _rowToVoucher(Map<String, dynamic> row) {
+    // Backend returns commerce.Coupon JSON:
+    //   id, code, discount_type ('percent'|'fixed'), discount_value,
+    //   min_order_value, max_uses, expires_at, session_id
+    final isPercent = (row['discount_type'] as String?) == 'percent';
+    final value = (row['discount_value'] as num? ?? 0).toDouble();
+    final minOrder = (row['min_order_value'] as num? ?? 0).toDouble();
+    final desc = isPercent
+        ? 'Giảm ${value.toInt()}% cho đơn từ ${minOrder.toInt()}đ'
+        : 'Giảm ${value.toInt()}đ cho đơn từ ${minOrder.toInt()}đ';
+    return LiveVoucher(
+      id:           (row['id'] ?? '') as String,
+      code:         (row['code'] ?? '') as String,
+      description:  desc,
+      discountValue: value,
+      isPercentage: isPercent,
+      minOrderValue: minOrder,
+      expiresAt:    row['expires_at'] != null
+          ? DateTime.parse(row['expires_at'] as String)
+          : DateTime.now().add(const Duration(days: 7)),
+    );
+  }
+
   // ─── Tab ──────────────────────────────────────────────────────────────────
 
   void setActiveTab(LiveTab tab) {
@@ -249,8 +373,28 @@ class LiveProvider extends ChangeNotifier {
 
   Future<void> openStream(String streamId) async {
     try {
-      final idx = _streams.indexWhere((s) => s.id == streamId);
-      if (idx == -1) return;
+      // If the session isn't cached yet (typical for the host who just
+      // created a brand-new stream), fetch the row from the backend and
+      // insert it into _streams so the rest of this method works the
+      // same for host + viewer.
+      int idx = _streams.indexWhere((s) => s.id == streamId);
+      if (idx == -1) {
+        try {
+          final all = await LiveRepository.instance.fetchLiveSessions();
+          final fresh = all.firstWhere(
+            (r) => r['id'] == streamId,
+            orElse: () => <String, dynamic>{},
+          );
+          if (fresh.isNotEmpty) {
+            _streams = [..._streams, _rowToLiveStream(fresh)];
+            idx = _streams.length - 1;
+          }
+        } catch (_) {}
+      }
+      if (idx == -1) {
+        AppLogger.logError(_tag, 'openStream: session $streamId not found', null, null);
+        return;
+      }
       _currentStream = _streams[idx];
       AppLogger.logUserEvent(action: 'stream_opened', context: _tag,
           metadata: {'streamId': streamId});
@@ -258,11 +402,14 @@ class LiveProvider extends ChangeNotifier {
       // Clear chat cũ trước khi load session mới
       _streams[idx] = _streams[idx].copyWith(comments: []);
 
-      // Load initial chat + resolve shopId + follow status song song
-      // shopId trong stream có thể là null nếu shop chưa được enrich
-      // getBySlug hỗ trợ UUID → backend fallback tìm theo seller_id
+      // Load chat + product list + resolve shopId + follow status in parallel.
+      // /streams endpoint omits products (separate query), so fetch them
+      // explicitly here — otherwise stream.products is always empty and
+      // the viewer sees no product cards.
       String resolvedShopId = _streams[idx].shopId ?? '';
       final chatFuture = LiveRepository.instance.fetchRecentChats(streamId);
+      final productsFuture = LiveRepository.instance.fetchSessionProducts(streamId);
+      final couponsFuture = LiveRepository.instance.fetchLiveCoupons(streamId);
 
       // Nếu chưa có shopId, resolve từ sellerId
       if (resolvedShopId.isEmpty) {
@@ -277,6 +424,10 @@ class LiveProvider extends ChangeNotifier {
 
       final chatRows = await chatFuture;
       final comments = chatRows.map(_rowToComment).toList();
+      final productRows = await productsFuture;
+      final products = productRows.map(_rowToLiveProduct).toList();
+      final couponRows = await couponsFuture;
+      final vouchers = couponRows.map(_rowToVoucher).toList();
 
       bool isFollowingShop = false;
       if (resolvedShopId.isNotEmpty) {
@@ -285,18 +436,32 @@ class LiveProvider extends ChangeNotifier {
 
       _streams[idx] = _streams[idx].copyWith(
         comments: comments,
+        products: products,
+        vouchers: vouchers,
         isFollowing: isFollowingShop,
       );
       _currentStream = _streams[idx];
 
-      // Viewer presence
-      await LiveRepository.instance.joinAsViewer(streamId);
-
-      // Start polling
+      // Order matters here:
+      //   1. Open the WS first so we're subscribed to the session hub
+      //      BEFORE the join triggers a stats push. Backend fires
+      //      `publishStatsEvent` from a goroutine right after the join
+      //      row is inserted; if we subscribed after the POST returned,
+      //      that first event would race past us and viewer_count
+      //      would stay at 0 on this client (the host's overlay still
+      //      ticks up because they were already subscribed).
+      //   2. Then POST /join so our row lands in live_viewers.
+      //   3. Then fetch /stats once to cover the case where the push
+      //      did slip past anyway (e.g. WS handshake still in flight).
       _startPolling(streamId);
+      await LiveRepository.instance.joinAsViewer(streamId);
+      _refreshStatsOnce(streamId);
 
       startSuggestionRefresh(streamId);
-      _floatingVoucherId = null;
+      // Show the first available voucher as a floating banner so viewer
+      // can save it on entry (Shopee Live style). Cleared on dismiss/save.
+      final vs = _streams[idx].vouchers;
+      _floatingVoucherId = vs.isNotEmpty ? vs.first.id : null;
       notifyListeners();
     } catch (e, st) {
       AppLogger.logError(_tag, 'openStream failed', e, st);
@@ -316,89 +481,169 @@ class LiveProvider extends ChangeNotifier {
     _floatingVoucherId = null;
     _floatingVoucherId = null;
     _liveCart.clear();
-    notifyListeners();
+    _liveSessionCartItemIds.clear();
+    // closeStream() is called from LiveStreamScreen.dispose(), which means
+    // the widget tree is currently locked — notifyListeners() during that
+    // phase throws "setState called when widget tree was locked". Defer to
+    // a microtask so other listeners (LiveTabScreen, MainScreen badge) get
+    // notified after the dispose pass completes.
+    scheduleMicrotask(notifyListeners);
   }
 
   String get _localUserId => AuthService.instance.currentUserId;
 
-  // ─── Polling (thay Supabase Realtime) ────────────────────────────────────
+  // ─── Realtime channel (replaces chat + stats polling) ─────────────────────
 
+  /// Open the WS for this session + load initial chat history once. The
+  /// WS only pushes deltas (new chat / stats updates); the initial 50
+  /// messages need a one-shot REST fetch so the viewer doesn't see an
+  /// empty chat box until the first new message arrives.
   void _startPolling(String sessionId) {
     _stopPolling();
     _pollingSessionId = sessionId;
 
-    // Chat: poll mỗi 3 giây
-    _chatTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+    // 1. One-shot REST backfill of recent chat so we don't show empty.
+    LiveRepository.instance.fetchRecentChats(sessionId).then((chats) {
       if (_pollingSessionId != sessionId) return;
-      try {
-        final chats = await LiveRepository.instance.fetchRecentChats(sessionId);
-        final fetched = chats.map(_rowToComment).toList();
-        final idx = _streams.indexWhere((s) => s.id == sessionId);
-        if (idx == -1) return;
+      final fetched = chats.map(_rowToComment).toList();
+      final idx = _streams.indexWhere((s) => s.id == sessionId);
+      if (idx == -1) return;
+      _streams[idx] = _streams[idx].copyWith(
+        comments: fetched.length > 50
+            ? fetched.sublist(fetched.length - 50)
+            : fetched,
+      );
+      if (_currentStream?.id == sessionId) _currentStream = _streams[idx];
+      notifyListeners();
+    }).catchError((_) {/* swallow — WS still works */});
 
-        // Merge: append tin mới từ server, xóa optimistic đã được server confirm
-        final existing = _streams[idx].comments;
-        final fetchedIds = fetched.map((c) => c.id).toSet();
-        final fetchedKeys = fetched.map((c) => '${c.userId}|${c.message}').toSet();
-
-        // Giữ lại: tin real (có trong fetched) + tin optimistic chưa được confirm + tin bot local
-        final kept = existing.where((c) {
-          if (fetchedIds.contains(c.id)) return true; // đã sync
-          if (c.id.startsWith('opt_') && fetchedKeys.contains('${c.userId}|${c.message}')) return false; // optimistic đã confirm → bỏ
-          return true; // giữ lại (bot local, optimistic chưa confirm)
-        }).toList();
-
-        final keptIds = kept.map((c) => c.id).toSet();
-        final newOnes = fetched.where((c) => !keptIds.contains(c.id)).toList();
-
-        // Detect coupon broadcast từ host → trigger popup trên viewer
-        if (onCouponBroadcasted != null) {
-          for (final c in newOnes) {
-            if (c.message.startsWith('🎫 Coupon:')) {
-              final match = RegExp(r'🎫 Coupon:\s*([A-Z0-9_-]+)').firstMatch(c.message);
-              if (match != null) onCouponBroadcasted?.call(match.group(1)!);
-            }
-          }
-        }
-
-        if (newOnes.isEmpty && kept.length == existing.length) return;
-
-        final merged = [...kept, ...newOnes]
-          ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
-        final trimmed = merged.length > 50 ? merged.sublist(merged.length - 50) : merged;
-        _streams[idx] = _streams[idx].copyWith(comments: trimmed);
-        if (_currentStream?.id == sessionId) _currentStream = _streams[idx];
-        notifyListeners();
-      } catch (_) {}
-    });
-
-    // Stats: poll mỗi 5 giây
-    _statsTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+    // 2. WS for live push.
+    final sock = LiveSocket(sessionId);
+    _socket = sock;
+    sock.events.listen((ev) {
       if (_pollingSessionId != sessionId) return;
-      try {
-        final stats = await LiveRepository.instance.fetchSessionStats(sessionId);
-
-        // Host đã kết thúc live → thông báo cho viewer
-        if (stats['status'] == 'ended') {
-          _stopPolling();
-          onSessionEnded?.call();
-          onSessionEnded = null;
-          return;
-        }
-
-        _updateStream(sessionId, (s) => s.copyWith(
-          viewerCount: (stats['viewer_count'] as num? ?? s.viewerCount).toInt(),
-          likeCount:   (stats['like_count']   as num? ?? s.likeCount).toInt(),
-        ));
-      } catch (_) {}
+      switch (ev.type) {
+        case 'chat':
+          _onChatEvent(sessionId, ev.raw);
+          break;
+        case 'stats':
+          _onStatsEvent(sessionId, ev.raw);
+          break;
+        case 'coupon_announce':
+          _onCouponAnnounce(sessionId, ev.raw);
+          break;
+      }
     });
+    sock.connect();
+  }
+
+  void _onChatEvent(String sessionId, Map<String, dynamic> raw) {
+    final msg = raw['message'] as Map<String, dynamic>?;
+    if (msg == null) return;
+    final c = _rowToComment(msg);
+    final idx = _streams.indexWhere((s) => s.id == sessionId);
+    if (idx == -1) return;
+    final existing = _streams[idx].comments;
+    // Dedupe by id (server confirms an optimistic insert) + by
+    // (userId|message) so the optimistic copy doesn't duplicate the
+    // pushed real copy.
+    final kept = existing.where((x) {
+      if (x.id == c.id) return false;
+      if (x.id.startsWith('opt_') && x.userId == c.userId && x.message == c.message) {
+        return false;
+      }
+      return true;
+    }).toList();
+    final merged = [...kept, c]
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final trimmed = merged.length > 50 ? merged.sublist(merged.length - 50) : merged;
+    // Detect coupon broadcast trigger (same pattern as old polling).
+    if (onCouponBroadcasted != null && c.message.startsWith('🎫 Coupon:')) {
+      final match = RegExp(r'🎫 Coupon:\s*([A-Z0-9_-]+)').firstMatch(c.message);
+      if (match != null) onCouponBroadcasted?.call(match.group(1)!);
+    }
+    _streams[idx] = _streams[idx].copyWith(comments: trimmed);
+    if (_currentStream?.id == sessionId) _currentStream = _streams[idx];
+    notifyListeners();
+  }
+
+  void _onStatsEvent(String sessionId, Map<String, dynamic> raw) {
+    if (raw['status'] == 'ended') {
+      _stopPolling();
+      onSessionEnded?.call();
+      onSessionEnded = null;
+      return;
+    }
+    final pinId = raw['pinned_product_id'];
+    _updateStream(sessionId, (s) => s.copyWith(
+      viewerCount: (raw['viewer_count'] as num? ?? s.viewerCount).toInt(),
+      likeCount:   (raw['like_count']   as num? ?? s.likeCount).toInt(),
+      // Stats event carries the current pin so every viewer's overlay
+      // reflects "GẶP LÊN" within ~one round-trip of the host tapping it.
+      // null is a real value here (= unpinned), so we always overwrite
+      // — using `??` would let the old pin linger after an unpin.
+      pinnedProductIds: pinId is String ? [pinId] : const [],
+    ));
+  }
+
+  /// Host posted (or re-announced) a coupon mid-stream. We splice the
+  /// fresh voucher into stream.vouchers + set floatingVoucherId so the
+  /// Shopee-style banner pops up over the video for ~30s. If the
+  /// coupon was already in the list (re-announce), we just re-trigger
+  /// the banner without duplicating.
+  void _onCouponAnnounce(String sessionId, Map<String, dynamic> raw) {
+    final coupon = raw['coupon'] as Map<String, dynamic>?;
+    if (coupon == null) return;
+    final id = coupon['id'] as String?;
+    if (id == null) return;
+    final voucher = LiveVoucher(
+      id: id,
+      code: (coupon['code'] ?? '') as String,
+      // Build a human-readable description from value + min so the
+      // banner subtitle says "Đơn tối thiểu 80K đ" without a separate
+      // backend field. Override here if the API ever adds one.
+      description: _buildCouponDescription(coupon),
+      discountValue: (coupon['discount_value'] as num? ?? 0).toDouble(),
+      isPercentage: (coupon['discount_type'] as String?) == 'percent',
+      minOrderValue: (coupon['min_order_value'] as num? ?? 0).toDouble(),
+      expiresAt: DateTime.tryParse(coupon['expires_at'] as String? ?? '')
+          ?? DateTime.now().add(const Duration(days: 1)),
+    );
+    _updateStream(sessionId, (s) {
+      final existing = s.vouchers.where((v) => v.id != id).toList();
+      return s.copyWith(vouchers: [voucher, ...existing]);
+    });
+    _floatingVoucherId = id;
+    notifyListeners();
+  }
+
+  String _buildCouponDescription(Map<String, dynamic> c) {
+    final minOrder = (c['min_order_value'] as num? ?? 0).toDouble();
+    if (minOrder <= 0) return 'Áp dụng mọi đơn hàng';
+    final fmt = minOrder >= 1000000
+        ? '${(minOrder / 1000000).toStringAsFixed(1)}tr đ'
+        : '${(minOrder / 1000).toInt()}K đ';
+    return 'Đơn tối thiểu $fmt';
   }
 
   void _stopPolling() {
-    _chatTimer?.cancel();
-    _statsTimer?.cancel();
-    _chatTimer = _statsTimer = null;
+    _socket?.close();
+    _socket = null;
     _pollingSessionId = null;
+  }
+
+  /// One-shot REST stats fetch used right after openStream(). Closes the
+  /// gap when the backend's stats push (fired right after /join) races
+  /// past our WS subscription before it's fully attached — without this
+  /// the viewer's own count stays at 0 until the NEXT mutate event
+  /// (another like, another join). Fire-and-forget; errors are silent
+  /// because the WS will eventually deliver an authoritative number.
+  Future<void> _refreshStatsOnce(String sessionId) async {
+    try {
+      final stats = await LiveRepository.instance.fetchSessionStats(sessionId);
+      if (_pollingSessionId != sessionId) return;
+      _onStatsEvent(sessionId, stats);
+    } catch (_) {/* WS will catch up */}
   }
 
   // ─── Host (seller) ────────────────────────────────────────────────────────
@@ -423,8 +668,7 @@ class LiveProvider extends ChangeNotifier {
 
     final session      = result['session'] as Map<String, dynamic>;
     final sessionId    = session['id'] as String;
-    // Go backend returns the stream key as session.agora_channel (legacy name).
-    final streamKey    = (session['agora_channel'] as String?) ?? '';
+    final streamKey    = (session['stream_key'] as String?) ?? '';
 
     _hostSessionId   = sessionId;
     _hostChannelName = streamKey;
@@ -633,27 +877,29 @@ class LiveProvider extends ChangeNotifier {
 
   // ─── Cart ─────────────────────────────────────────────────────────────────
 
-  // skuId == variantId trong Supabase product_variants
+  // skuId == variantId trong Supabase product_variants. Khi popup không
+  // có skuId (sản phẩm không có biến thể), vẫn route qua addSkuToCart để
+  // hit `/api/cart/items/from-live` — trước đây nhánh này chỉ tăng local
+  // counter nên item không bao giờ vào giỏ thật. Fire-and-forget vì popup
+  // đã đóng trước khi response về.
   void addToCart(String streamId, String productId) {
-    // Không có variantId cụ thể → không thể gọi API, chỉ cập nhật local count
-    _liveCart[productId] = (_liveCart[productId] ?? 0) + 1;
-    _activeProductPopupId = null;
-    notifyListeners();
+    unawaited(addSkuToCart(streamId, productId, null, 1));
   }
 
   Future<void> addSkuToCart(String streamId, String productId, String? skuId, int qty) async {
     // Track cart add luôn, kể cả khi API fail — đếm intent của viewer
     LiveRepository.instance.trackCartAdd(streamId);
     try {
-      if (skuId != null) {
-        await CartRepository.instance.addItem(variantId: skuId, quantity: qty);
-      } else {
-        await CartRepository.instance.addItemFromLive(
-          liveProductId: productId,
-          sessionId:     streamId,
-          quantity:      qty,
-        );
-      }
+      final item = skuId != null
+          ? await CartRepository.instance.addItem(variantId: skuId, quantity: qty)
+          : await CartRepository.instance.addItemFromLive(
+              liveProductId: productId,
+              sessionId:     streamId,
+              quantity:      qty,
+            );
+      // Remember cart_items.id so the floating mini-cart can filter
+      // CartProvider.items down to just things added during this live.
+      _liveSessionCartItemIds.add(item.id);
     } catch (e) {
       AppLogger.logError(_tag, 'addSkuToCart failed', e, null);
     }

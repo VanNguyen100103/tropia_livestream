@@ -9,13 +9,26 @@ ifneq (,$(wildcard .env.development))
     export
 endif
 
+# OS-specific runners (resolved by make at parse time — works under both
+# cmd.exe on Windows and bash on macOS/Linux).
+ifeq ($(OS),Windows_NT)
+    DEV_API_CMD := powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-api.ps1
+    DEV_ALL_CMD := powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/dev-all.ps1 $(if $(LAN),-LanIP)
+else
+    DEV_API_CMD := bash scripts/dev-api.sh
+    DEV_ALL_CMD := $(if $(LAN),LAN_IP=1) bash scripts/dev-all.sh
+endif
+
 .PHONY: help
 help:
 	@echo "Tropia backend — make targets"
 	@echo ""
 	@echo "Run / build:"
-	@echo "  make run                  — go run ./cmd/api"
+	@echo "  make run                  — go run ./cmd/api (SRS = localhost)"
+	@echo "  make dev-api              — go run ./cmd/api with SRS_*_HOST auto-set to LAN IP"
 	@echo "  make worker               — go run ./cmd/worker"
+	@echo "  make dev                  — API + worker in one terminal, prefixed logs"
+	@echo "  make dev LAN=1            — same, but also auto-set SRS_*_HOST to LAN IP"
 	@echo "  make build                — build ./api binary"
 	@echo "  make build-all            — build all 4 binaries (api, worker, migrate, seed)"
 	@echo "  make tidy                 — go mod tidy"
@@ -38,8 +51,22 @@ help:
 run:
 	go run ./cmd/api
 
+# Same as `run` but auto-overrides SRS_*_HOST with this machine's LAN IPv4
+# so phones / OBS on the same Wi-Fi can reach SRS. Use this when testing
+# on a physical device. Falls back to localhost for Chrome / emulator builds.
+dev-api:
+	$(DEV_API_CMD)
+
 worker:
 	go run ./cmd/worker
+
+# Run API + worker side-by-side in one terminal with prefixed logs ([api]/[wrk]).
+# Each stays its own process so a worker crash doesn't take the API down,
+# mirroring how they're deployed separately in k8s.
+#   make dev          — both, SRS = localhost
+#   make dev LAN=1    — both, SRS_*_HOST auto-exported from LAN IPv4
+dev:
+	$(DEV_ALL_CMD)
 
 build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o api ./cmd/api

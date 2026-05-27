@@ -11,7 +11,7 @@ import (
 type Role string
 
 const (
-	RoleViewer Role = "viewer"
+	RoleBuyer  Role = "buyer"
 	RoleSeller Role = "seller"
 	RoleAdmin  Role = "admin"
 )

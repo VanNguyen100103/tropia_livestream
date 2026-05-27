@@ -26,7 +26,15 @@ class ShopRepository {
 
   Future<ShopModel> getBySlug(String slug) async {
     final res = await _public.get('/api/shops/$slug');
-    return ShopModel.fromJson(res.data as Map<String, dynamic>);
+    // Backend wraps in {"shop": {...}, "is_following": bool}.  Pull out
+    // the inner object before parsing — passing the wrapper straight to
+    // ShopModel.fromJson made `j['id']` null and 'Không thể tải thông
+    // tin cửa hàng' came back from the catch arm.
+    final data = res.data as Map<String, dynamic>;
+    final shop = (data['shop'] as Map<String, dynamic>?) ?? data;
+    final isFollowing = data['is_following'] as bool? ?? false;
+    final model = ShopModel.fromJson(shop);
+    return isFollowing ? model.copyWith(isFollowing: true) : model;
   }
 
   // ── Seller ────────────────────────────────────────────────────────────────
@@ -34,7 +42,11 @@ class ShopRepository {
   Future<ShopModel?> getMyShop() async {
     try {
       final res = await _dio.get('/api/shops/me/info');
-      return ShopModel.fromJson(res.data as Map<String, dynamic>);
+      final data = res.data as Map<String, dynamic>;
+      // {"shop": null} means the seller hasn't created a shop yet.
+      final shop = data['shop'];
+      if (shop == null) return null;
+      return ShopModel.fromJson(shop as Map<String, dynamic>);
     } catch (e) {
       AppLogger.logInfo(_tag, 'No shop yet: $e');
       return null;
@@ -43,13 +55,17 @@ class ShopRepository {
 
   Future<ShopModel> create(Map<String, dynamic> body) async {
     final res = await _dio.post('/api/shops', data: body);
-    AppLogger.logInfo(_tag, 'Shop created: ${res.data['id']}');
-    return ShopModel.fromJson(res.data as Map<String, dynamic>);
+    final data = res.data as Map<String, dynamic>;
+    final shop = (data['shop'] as Map<String, dynamic>?) ?? data;
+    AppLogger.logInfo(_tag, 'Shop created: ${shop['id']}');
+    return ShopModel.fromJson(shop);
   }
 
   Future<ShopModel> update(String id, Map<String, dynamic> body) async {
     final res = await _dio.patch('/api/shops/$id', data: body);
-    return ShopModel.fromJson(res.data as Map<String, dynamic>);
+    final data = res.data as Map<String, dynamic>;
+    final shop = (data['shop'] as Map<String, dynamic>?) ?? data;
+    return ShopModel.fromJson(shop);
   }
 
   // ── Follow ────────────────────────────────────────────────────────────────

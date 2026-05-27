@@ -1,12 +1,16 @@
 package live
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/tropia/backend/internal/ai"
+	"github.com/tropia/backend/internal/commerce"
 	"github.com/tropia/backend/internal/httpx"
 )
 
@@ -15,12 +19,48 @@ import (
 // - POST /streams/:id/ai-reply        → host auto-reply for one viewer question
 // - POST /streams/:id/analyze         → sentiment + summary + 4 tips for the session
 type AIHandler struct {
-	ai   *ai.DeepSeek
-	repo *SessionRepository
+	ai      *ai.DeepSeek
+	repo    *SessionRepository
+	coupons *commerce.CouponRepository // optional; nil = bot can't reference real coupon codes
 }
 
 func NewAIHandler(deepseek *ai.DeepSeek, repo *SessionRepository) *AIHandler {
 	return &AIHandler{ai: deepseek, repo: repo}
+}
+
+// WithCoupons lets the AI prompt include the live session's active
+// coupons so suggestion/reply questions reference the real announced
+// code (e.g. LIVE250515) instead of inventing generic promos.
+func (h *AIHandler) WithCoupons(cr *commerce.CouponRepository) *AIHandler {
+	h.coupons = cr
+	return h
+}
+
+// activeCouponHints mirrors Handler.activeCouponHints — kept local to
+// avoid a circular dep through the live package's bot reply path.
+func (h *AIHandler) activeCouponHints(ctx context.Context, sessionID uuid.UUID) []ai.CouponHint {
+	if h.coupons == nil {
+		return nil
+	}
+	list, err := h.coupons.ListBySession(ctx, sessionID)
+	if err != nil {
+		slog.Default().Warn("ai_handler: load coupons failed", "session", sessionID, "err", err)
+		return nil
+	}
+	now := time.Now()
+	out := make([]ai.CouponHint, 0, len(list))
+	for _, c := range list {
+		if !c.IsActive || c.ExpiresAt.Before(now) {
+			continue
+		}
+		out = append(out, ai.CouponHint{
+			Code:          c.Code,
+			DiscountType:  c.DiscountType,
+			DiscountValue: c.DiscountValue,
+			MinOrderValue: c.MinOrderValue,
+		})
+	}
+	return out
 }
 
 func (h *AIHandler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc) {
@@ -89,16 +129,31 @@ func (h *AIHandler) suggestions(c *gin.Context) {
 	var req aiSuggestionsReq
 	_ = c.ShouldBindJSON(&req)
 
-	name, category := h.productNameForAI(c, sess.ID, req.ProductName)
-	if category == "" {
-		category = req.Category
+	// Pull the full pinned-product list from DB so DeepSeek can rotate
+	// topics across multiple SKUs instead of asking 3 near-duplicate
+	// questions about a single product.
+	products, _ := h.repo.ListProducts(c.Request.Context(), sess.ID)
+	hints := make([]ai.SuggestionProduct, 0, len(products))
+	for _, p := range products {
+		cat := ""
+		if p.Category != nil {
+			cat = *p.Category
+		}
+		hints = append(hints, ai.SuggestionProduct{
+			Name:     p.ProductName,
+			Price:    p.SalePrice,
+			Category: cat,
+		})
 	}
-	if name == "" {
-		c.Error(httpx.NewValidation("no product to suggest about", nil))
-		return
+	if len(hints) == 0 && req.ProductName != "" {
+		// Caller-supplied fallback (legacy callers / no products pinned yet)
+		hints = append(hints, ai.SuggestionProduct{
+			Name: req.ProductName, Category: req.Category,
+		})
 	}
 
-	out, err := h.ai.GetSuggestions(c.Request.Context(), name, category)
+	couponHints := h.activeCouponHints(c.Request.Context(), sess.ID)
+	out, err := h.ai.GetSuggestions(c.Request.Context(), hints, req.Category, couponHints)
 	if err != nil {
 		c.Error(httpx.NewInternal("ai suggestions", err))
 		return
@@ -131,7 +186,8 @@ func (h *AIHandler) reply(c *gin.Context) {
 		name = "sản phẩm"
 	}
 
-	reply, err := h.ai.GetAutoReply(c.Request.Context(), req.Question, name, category)
+	couponHints := h.activeCouponHints(c.Request.Context(), sess.ID)
+	reply, err := h.ai.GetAutoReply(c.Request.Context(), req.Question, name, category, couponHints)
 	if err != nil {
 		c.Error(httpx.NewInternal("ai reply", err))
 		return

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:tropia/core/constants/app_constants.dart';
 import 'package:tropia/core/utils/logger.dart';
 import 'package:tropia/features/live/data/live_repository.dart';
+import 'package:tropia/features/live/screens/vod_replay_screen.dart';
 
 const _tag = 'LiveEndScreen';
 
@@ -357,6 +358,38 @@ class _LiveEndScreenState extends State<LiveEndScreen>
       padding: const EdgeInsets.symmetric(horizontal: AppSizes.md),
       child: Column(
         children: [
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                AppLogger.logUserEvent(
+                  action: 'live_replay_opened',
+                  context: _tag,
+                  metadata: {'session_id': widget.sessionId},
+                );
+                Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => VodReplayScreen(
+                    sessionId: widget.sessionId,
+                    title: widget.title,
+                  ),
+                ));
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: AppSizes.sm),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppSizes.radiusMd),
+                ),
+              ),
+              icon: const Icon(Icons.play_circle_outline, size: 20),
+              label: const Text(
+                'Xem lại buổi Live',
+                style: TextStyle(fontSize: AppSizes.fontMd, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+          const SizedBox(height: AppSizes.sm),
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(

@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,17 +12,109 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tropia/backend/internal/auth"
 	"github.com/tropia/backend/internal/httpx"
 )
 
+// UploadHandler runs ownership checks against the DB before letting the
+// authenticated seller write into R2 under a path that includes the
+// target resource id. Without these checks, OWASP API1 (BOLA): any
+// seller could overwrite another seller's product/shop/variant/cover
+// images by guessing UUIDs.
 type UploadHandler struct {
 	r2 *R2
+	db *pgxpool.Pool
 }
 
-func NewUploadHandler(r2 *R2) *UploadHandler {
-	return &UploadHandler{r2: r2}
+func NewUploadHandler(r2 *R2, db *pgxpool.Pool) *UploadHandler {
+	return &UploadHandler{r2: r2, db: db}
+}
+
+// ownerOfProduct, ownerOfVariant, ownerOfShop, ownerOfSession all return
+// the seller_id that owns the given resource, or ErrNoOwner if it
+// doesn't exist. The handler then refuses the upload unless seller_id
+// matches the JWT's user id (or the caller is admin).
+var errNoOwner = errors.New("resource not found")
+
+func (h *UploadHandler) ownerOfProduct(ctx context.Context, productID uuid.UUID) (uuid.UUID, error) {
+	var sellerID uuid.UUID
+	err := h.db.QueryRow(ctx,
+		`SELECT s.seller_id FROM products p JOIN shops s ON s.id = p.shop_id WHERE p.id = $1`,
+		productID).Scan(&sellerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errNoOwner
+	}
+	return sellerID, err
+}
+
+func (h *UploadHandler) ownerOfVariant(ctx context.Context, variantID uuid.UUID) (uuid.UUID, error) {
+	var sellerID uuid.UUID
+	err := h.db.QueryRow(ctx,
+		`SELECT s.seller_id FROM product_variants v
+		   JOIN products p ON p.id = v.product_id
+		   JOIN shops s    ON s.id = p.shop_id
+		  WHERE v.id = $1`,
+		variantID).Scan(&sellerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errNoOwner
+	}
+	return sellerID, err
+}
+
+func (h *UploadHandler) ownerOfShop(ctx context.Context, shopID uuid.UUID) (uuid.UUID, error) {
+	var sellerID uuid.UUID
+	err := h.db.QueryRow(ctx,
+		`SELECT seller_id FROM shops WHERE id = $1`,
+		shopID).Scan(&sellerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errNoOwner
+	}
+	return sellerID, err
+}
+
+func (h *UploadHandler) ownerOfSession(ctx context.Context, sessionID uuid.UUID) (uuid.UUID, error) {
+	var sellerID uuid.UUID
+	err := h.db.QueryRow(ctx,
+		`SELECT seller_id FROM live_sessions WHERE id = $1`,
+		sessionID).Scan(&sellerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, errNoOwner
+	}
+	return sellerID, err
+}
+
+// assertOwner is the gate every BOLA-sensitive upload runs through.
+// Parses + validates the resource id, fetches its owning seller_id via
+// the lookup fn, and compares to the JWT subject. Returns the parsed
+// uuid + the caller's claims so handlers can keep the rest of the
+// upload flow simple.
+func (h *UploadHandler) assertOwner(c *gin.Context, rawID string, lookup func(context.Context, uuid.UUID) (uuid.UUID, error)) (uuid.UUID, bool) {
+	id, err := uuid.Parse(rawID)
+	if err != nil {
+		c.Error(httpx.NewValidation("invalid resource id", nil))
+		return uuid.Nil, false
+	}
+	owner, err := lookup(c.Request.Context(), id)
+	if errors.Is(err, errNoOwner) {
+		// Return 404 (not 403) so we don't leak which IDs exist —
+		// matches the BOLA defense pattern documented in CLAUDE.md.
+		c.Error(httpx.NewNotFound("resource not found"))
+		return uuid.Nil, false
+	}
+	if err != nil {
+		c.Error(httpx.NewInternal("ownership lookup", err))
+		return uuid.Nil, false
+	}
+	claims, _ := auth.ClaimsFrom(c)
+	uid, _ := uuid.Parse(claims.UserID)
+	if owner != uid && claims.Role != auth.RoleAdmin {
+		c.Error(httpx.NewNotFound("resource not found"))
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 func (h *UploadHandler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc) {
@@ -83,9 +177,13 @@ func (h *UploadHandler) avatar(c *gin.Context) {
 }
 
 func (h *UploadHandler) product(c *gin.Context) {
-	productID := c.PostForm("product_id")
-	if productID == "" {
+	rawID := c.PostForm("product_id")
+	if rawID == "" {
 		c.Error(httpx.NewValidation("product_id required", nil))
+		return
+	}
+	productID, ok := h.assertOwner(c, rawID, h.ownerOfProduct)
+	if !ok {
 		return
 	}
 	form, err := c.MultipartForm()
@@ -129,9 +227,13 @@ func (h *UploadHandler) product(c *gin.Context) {
 // Form: variant_id (text) + images[] (max 5 files).
 // Returns {urls: [...]} matching the product endpoint shape.
 func (h *UploadHandler) variant(c *gin.Context) {
-	variantID := c.PostForm("variant_id")
-	if variantID == "" {
+	rawID := c.PostForm("variant_id")
+	if rawID == "" {
 		c.Error(httpx.NewValidation("variant_id required", nil))
+		return
+	}
+	variantID, ok := h.assertOwner(c, rawID, h.ownerOfVariant)
+	if !ok {
 		return
 	}
 	form, err := c.MultipartForm()
@@ -172,9 +274,13 @@ func (h *UploadHandler) variant(c *gin.Context) {
 }
 
 func (h *UploadHandler) shop(c *gin.Context) {
-	shopID := c.PostForm("shop_id")
-	if shopID == "" {
+	rawID := c.PostForm("shop_id")
+	if rawID == "" {
 		c.Error(httpx.NewValidation("shop_id required", nil))
+		return
+	}
+	shopID, ok := h.assertOwner(c, rawID, h.ownerOfShop)
+	if !ok {
 		return
 	}
 	data, ct, err := h.readImage(c, "image")
@@ -192,9 +298,13 @@ func (h *UploadHandler) shop(c *gin.Context) {
 }
 
 func (h *UploadHandler) liveCover(c *gin.Context) {
-	sessionID := c.PostForm("session_id")
-	if sessionID == "" {
+	rawID := c.PostForm("session_id")
+	if rawID == "" {
 		c.Error(httpx.NewValidation("session_id required", nil))
+		return
+	}
+	sessionID, ok := h.assertOwner(c, rawID, h.ownerOfSession)
+	if !ok {
 		return
 	}
 	data, ct, err := h.readImage(c, "image")

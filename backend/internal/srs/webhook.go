@@ -2,6 +2,7 @@ package srs
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -33,10 +34,24 @@ func (noopPublisher) Publish(context.Context, string, any) error { return nil }
 type Handler struct {
 	repo   *live.SessionRepository
 	events EventPublisher
+	// Shared secret SRS must include as `?secret=...` on every webhook
+	// URL. Without this anyone can POST forged on_publish (mark fake
+	// streams live), on_dvr (trigger junk R2 uploads), etc. Set via
+	// SRS_WEBHOOK_SECRET env + matching `?secret=…` in srs.conf
+	// http_hooks URLs.
+	secret string
 }
 
 func NewHandler(repo *live.SessionRepository) *Handler {
 	return &Handler{repo: repo, events: noopPublisher{}}
+}
+
+// WithSecret enables shared-secret auth on webhook routes. Empty string
+// disables the check (useful in dev where SRS is on the same host and
+// the port is firewalled). Production MUST set a non-empty secret.
+func (h *Handler) WithSecret(secret string) *Handler {
+	h.secret = secret
+	return h
 }
 
 // WithEvents wires an event bus so on_dvr can hand recordings off to the
@@ -48,7 +63,27 @@ func (h *Handler) WithEvents(p EventPublisher) *Handler {
 	return h
 }
 
+// verifySecret middleware — drops any webhook missing `?secret=…` that
+// matches the configured shared secret. Uses constant-time compare so a
+// timing attack can't reveal the secret one byte at a time. Returns
+// HTTP 200 with body "1" (deny code) so SRS treats the rejection as
+// "stream not allowed" rather than retrying.
+func (h *Handler) verifySecret(c *gin.Context) {
+	if h.secret == "" {
+		c.Next()
+		return
+	}
+	got := c.Query("secret")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(h.secret)) != 1 {
+		deny(c, 1)
+		c.Abort()
+		return
+	}
+	c.Next()
+}
+
 func (h *Handler) Register(r *gin.RouterGroup) {
+	r.Use(h.verifySecret)
 	r.POST("/on_publish", h.onPublish)
 	r.POST("/on_unpublish", h.onUnpublish)
 	r.POST("/on_play", h.onPlay)
@@ -63,7 +98,7 @@ func (h *Handler) Register(r *gin.RouterGroup) {
 //   "ip": "127.0.0.1",
 //   "vhost": "__defaultVhost__",
 //   "app": "live",
-//   "stream": "live_abc123",   <-- this is our agora_channel
+//   "stream": "live_abc123",   <-- this is our stream_key
 //   "param": "?token=xxx",
 //   "file": "./objs/nginx/html/dvr/live/live_abc.1234.flv",  // on_dvr only
 //   "duration": 67                                            // on_dvr only (seconds)

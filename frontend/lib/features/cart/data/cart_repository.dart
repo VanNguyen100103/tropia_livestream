@@ -29,8 +29,8 @@ class CartRepository {
     int quantity = 1,
   }) async {
     final res = await _dio.post('/api/cart/items', data: {
-      'variantId': variantId,
-      'quantity':  quantity,
+      'variant_id': variantId,
+      'quantity':   quantity,
     });
     AppLogger.logUserEvent(
       action: 'add_to_cart',
@@ -47,9 +47,9 @@ class CartRepository {
     int quantity = 1,
   }) async {
     final res = await _dio.post('/api/cart/items/from-live', data: {
-      'liveProductId': liveProductId,
-      'sessionId':     sessionId,
-      'quantity':      quantity,
+      'live_product_id': liveProductId,
+      'session_id':      sessionId,
+      'quantity':        quantity,
     });
     AppLogger.logUserEvent(
       action: 'live_add_to_cart',

@@ -26,19 +26,41 @@ spec:
       labels:
         app: worker
     spec:
+      # Same uid as backend.yaml (matches the `app` user in
+      # backend/Dockerfile). The FFmpeg remux pipeline writes to /tmp
+      # which is an emptyDir mount, so even with readOnlyRootFilesystem
+      # the worker can stage VOD files before uploading to R2.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
-          image: tropia/backend:dev   # same image as api Deployment
+          # Pin to a digest in CI (see backend.yaml comment).
+          image: tropia/backend:dev
           imagePullPolicy: IfNotPresent
           command: ["/app/worker"]    # override the api entrypoint
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - configMapRef: { name: backend-config }
             - secretRef:    { name: tropia-secrets }
           env:
             - name: DATABASE_URL
               value: postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/tropia?sslmode=disable
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
           resources:
             requests: { cpu: 50m,  memory: 64Mi }
             limits:   { cpu: 500m, memory: 256Mi }
           # No HTTP server → liveness probe by running `/app/worker --healthcheck`
           # is overkill for now. Add later if worker grows complex.
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 512Mi }   # FFmpeg remux scratch space

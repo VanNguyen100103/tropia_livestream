@@ -28,6 +28,9 @@ migrate_working_dir/
 .idea/
 # .vscode/   uncomment if you want to ignore VSCode workspace settings
 
+# ── Claude Code local settings (personal, machine-specific) ──────────────────
+.claude/
+
 # ── Flutter / Dart / Pub (frontend/) ─────────────────────────────────────────
 frontend/.dart_tool/
 frontend/.flutter-plugins-dependencies
@@ -47,6 +50,14 @@ frontend/android/app/release/
 # Symbolication / obfuscation
 frontend/app.*.symbols
 frontend/app.*.map.json
+
+# Real env files consumed by --dart-define-from-file (only env.example.json
+# is committed; copy it to env.development.json / env.staging.json /
+# env.production.json and fill in real values per environment).
+frontend/env.development.json
+frontend/env.staging.json
+frontend/env.production.json
+frontend/env.local.json
 
 # ── Backend Go (backend/) ────────────────────────────────────────────────────
 # Real .env files (only .env.example committed)

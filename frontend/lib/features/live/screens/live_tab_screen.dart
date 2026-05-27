@@ -33,12 +33,50 @@ class _LiveTabScreenState extends State<LiveTabScreen>
   @override
   void initState() {
     super.initState();
+    // 3 tabs: Video | Live | Theo dõi. Order matches LiveTab enum so
+    // the index lookup below works without a manual mapping.
     _tabController = TabController(length: 3, vsync: this, initialIndex: 1);
     _tabController.addListener(() {
       if (_tabController.indexIsChanging) return;
       final tab = LiveTab.values[_tabController.index];
+      // Gate the "Theo dõi" tab behind login — otherwise an anonymous
+      // viewer would just see an empty list with no explanation. Bounce
+      // them back to Live and prompt for login.
+      if (tab == LiveTab.following && !AuthService.instance.isSignedIn) {
+        _tabController.animateTo(1);
+        _promptLoginForFollowing();
+        return;
+      }
       context.read<LiveProvider>().setActiveTab(tab);
     });
+  }
+
+  void _promptLoginForFollowing() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Đăng nhập để xem shop đang theo dõi'),
+        content: const Text(
+          'Bạn cần đăng nhập để xem các buổi live từ những shop bạn đã theo dõi.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Để sau'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+              );
+            },
+            style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
+            child: const Text('Đăng nhập'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -140,7 +178,7 @@ class _LiveTabScreenState extends State<LiveTabScreen>
     );
   }
 
-  // ── Tab bar (Video | ● Live | Cho bạn) – nền đen ──────────────────────────
+  // ── Tab bar (Video | ● Live | Theo dõi) – nền đen ─────────────────────────
 
   Widget _buildTabBar() {
     return Container(
@@ -154,6 +192,8 @@ class _LiveTabScreenState extends State<LiveTabScreen>
         indicatorSize: TabBarIndicatorSize.label,
         labelStyle: const TextStyle(fontSize: AppSizes.fontMd, fontWeight: FontWeight.w700),
         unselectedLabelStyle: const TextStyle(fontSize: AppSizes.fontMd, fontWeight: FontWeight.w400),
+        isScrollable: true,
+        tabAlignment: TabAlignment.center,
         tabs: [
           const Tab(
             child: Row(
@@ -179,7 +219,43 @@ class _LiveTabScreenState extends State<LiveTabScreen>
               ],
             ),
           ),
-          const Tab(text: AppStrings.liveTabForYou),
+          // "Theo dõi" — Shopee-style. Shows a small counter next to the
+          // label when there's at least one followed shop currently live,
+          // so the user has a reason to glance at it.
+          Tab(
+            child: Consumer<LiveProvider>(
+              builder: (_, p, __) {
+                final liveFollowedCount = p.streams
+                    .where((s) =>
+                        s.isFollowing && s.status == StreamStatus.live)
+                    .length;
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text(AppStrings.liveTabFollowing),
+                    if (liveFollowedCount > 0) ...[
+                      const SizedBox(width: 4),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: AppColors.liveRed,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '$liveFollowedCount',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                );
+              },
+            ),
+          ),
         ],
       ),
     );
@@ -368,27 +444,50 @@ class _LiveTabScreenState extends State<LiveTabScreen>
   // ── Empty state ────────────────────────────────────────────────────────────
 
   Widget _buildEmptyState() {
+    // Custom copy for the "Theo dõi" tab so the user understands why the
+    // list is empty (no follows yet) instead of "no live happening".
+    final isFollowing = _tabController.index == LiveTab.following.index;
     return Container(
       color: AppColors.background,
-      child: const Center(
+      child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.live_tv_outlined, size: AppSizes.iconXl, color: AppColors.textHint),
-            SizedBox(height: AppSizes.md),
+            Icon(
+              isFollowing ? Icons.favorite_border : Icons.live_tv_outlined,
+              size: AppSizes.iconXl,
+              color: AppColors.textHint,
+            ),
+            const SizedBox(height: AppSizes.md),
             Text(
-              AppStrings.liveEmpty,
-              style: TextStyle(
+              isFollowing
+                  ? 'Bạn chưa theo dõi shop nào'
+                  : AppStrings.liveEmpty,
+              style: const TextStyle(
                 color: AppColors.textPrimary,
                 fontSize: AppSizes.fontLg,
                 fontWeight: FontWeight.w600,
               ),
             ),
-            SizedBox(height: AppSizes.xs),
+            const SizedBox(height: AppSizes.xs),
             Text(
-              'Quay lại sau để xem các buổi live tiếp theo',
-              style: TextStyle(color: AppColors.textSecondary, fontSize: AppSizes.fontSm),
+              isFollowing
+                  ? 'Theo dõi shop để cập nhật khi họ phát live'
+                  : 'Quay lại sau để xem các buổi live tiếp theo',
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: AppSizes.fontSm,
+              ),
             ),
+            if (isFollowing) ...[
+              const SizedBox(height: AppSizes.md),
+              FilledButton.icon(
+                onPressed: () => _tabController.animateTo(1),
+                style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
+                icon: const Icon(Icons.explore_outlined, size: 18),
+                label: const Text('Khám phá live'),
+              ),
+            ],
           ],
         ),
       ),

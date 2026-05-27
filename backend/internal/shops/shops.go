@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -255,12 +256,30 @@ func (h *Handler) myShop(c *gin.Context) {
 func (h *Handler) following(c *gin.Context) {
 	claims, _ := auth.ClaimsFrom(c)
 	uid, _ := uuid.Parse(claims.UserID)
-	shops, err := h.repo.ListFollowing(c.Request.Context(), uid, 50, 0)
+	// Pagination params — caller (Flutter ShopRepository) sends
+	// offset+limit. Defaults match the historical 50/0 values.
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	shops, err := h.repo.ListFollowing(c.Request.Context(), uid, limit, offset)
 	if err != nil {
 		c.Error(httpx.NewInternal("list following", err))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"shops": shops})
+	// Response shape contract the Flutter side parses: `data` (array of
+	// shops) + `count` (total length). Was returning `{shops: [...]}` so
+	// the frontend's `(d['data'] as List)` crashed in the try/catch and
+	// silently returned an empty follow set — every live card flashed
+	// "+ Theo dõi" on reload even for shops the user already follows.
+	c.JSON(http.StatusOK, gin.H{
+		"data":  shops,
+		"count": len(shops),
+	})
 }
 
 type createShopReq struct {

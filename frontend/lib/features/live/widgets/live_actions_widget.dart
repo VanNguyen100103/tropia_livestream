@@ -22,6 +22,7 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:tropia/core/constants/app_constants.dart';
 import 'package:tropia/features/live/models/live_stream_model.dart';
 
@@ -155,7 +156,9 @@ class _LiveActionsWidgetState extends State<LiveActionsWidget>
   // ─────────────────────────────────────────────────────────────────────────
 
   Widget _buildSellerAvatar() {
-    return GestureDetector(
+    return PointerInterceptor(
+      child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: widget.onFollowTap,
       child: Stack(
         clipBehavior: Clip.none,
@@ -203,6 +206,7 @@ class _LiveActionsWidgetState extends State<LiveActionsWidget>
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -342,9 +346,24 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: child,
+    // Without an explicit hit-test behavior, GestureDetector defaults to
+    // deferToChild — so only pixels actually painted by the icon + count
+    // text receive taps. The transparent gaps inside the column (between
+    // icon and number, around the number) silently ignore touches, which
+    // is why the heart felt "dead" on web even though the handler is
+    // wired up. `opaque` makes the whole column a single hit-test region.
+    // PointerInterceptor lets the click reach Flutter's canvas in the
+    // first place — needed on Flutter web because the HtmlElementView
+    // <video> sits in the same DOM stacking context and otherwise wins
+    // the browser's pointer-events race for buttons sitting over the
+    // video area (video has pointer-events:none on the element itself,
+    // but its host wrapper div still grabs them in some browsers).
+    return PointerInterceptor(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: child,
+      ),
     );
   }
 }

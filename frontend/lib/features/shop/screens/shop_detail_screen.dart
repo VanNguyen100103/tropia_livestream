@@ -2,6 +2,8 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:tropia/core/constants/app_constants.dart';
 import 'package:tropia/core/utils/logger.dart';
+import 'package:tropia/features/live/data/live_repository.dart';
+import 'package:tropia/features/live/screens/live_stream_screen.dart';
 import 'package:tropia/features/product/models/product_model.dart';
 import 'package:tropia/features/product/data/product_repository.dart';
 import 'package:tropia/features/shop/data/shop_repository.dart';
@@ -28,6 +30,10 @@ class _ShopDetailScreenState extends State<ShopDetailScreen> {
   bool _loadingShop = true;
   bool _loadingProducts = false;
   String? _error;
+  // ID của session live đang active thuộc shop này (nếu có). Cho biết
+  // banner "Kéo xuống để xem livestream" có hiển thị + tap navigate đi
+  // đâu. Null = shop đang không live.
+  String? _activeLiveSessionId;
 
   @override
   void initState() {
@@ -45,10 +51,39 @@ class _ShopDetailScreenState extends State<ShopDetailScreen> {
         _loadingShop = false;
       });
       _loadProducts(shop.id);
+      _checkActiveLive(shop);
     } catch (e, st) {
       AppLogger.logError(_tag, 'loadShop failed', e, st);
       if (mounted) setState(() { _loadingShop = false; _error = 'Không thể tải thông tin cửa hàng'; });
     }
+  }
+
+  /// Detect if this shop has an active live session so we can show the
+  /// "Kéo xuống để xem livestream" banner Shopee uses on the shop page.
+  /// Matches by shop_id from the live_sessions list endpoint.
+  Future<void> _checkActiveLive(ShopModel shop) async {
+    try {
+      final rows = await LiveRepository.instance.fetchLiveSessions();
+      for (final row in rows) {
+        if (row['shop_id'] == shop.id) {
+          if (!mounted) return;
+          setState(() => _activeLiveSessionId = row['id'] as String?);
+          return;
+        }
+      }
+    } catch (e) {
+      AppLogger.logError(_tag, 'checkActiveLive failed', e, null);
+    }
+  }
+
+  void _openLive() {
+    final sid = _activeLiveSessionId;
+    if (sid == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => LiveStreamScreen(streamId: sid),
+      ),
+    );
   }
 
   Future<void> _loadProducts(String shopId) async {
@@ -124,6 +159,8 @@ class _ShopDetailScreenState extends State<ShopDetailScreen> {
       body: CustomScrollView(
         slivers: [
           _buildSliverAppBar(shop),
+          if (_activeLiveSessionId != null)
+            SliverToBoxAdapter(child: _buildLiveBanner()),
           SliverToBoxAdapter(child: _buildShopInfo(shop)),
           SliverToBoxAdapter(child: _buildStats(shop)),
           const SliverToBoxAdapter(
@@ -141,6 +178,72 @@ class _ShopDetailScreenState extends State<ShopDetailScreen> {
           ),
           _buildProductGrid(),
         ],
+      ),
+    );
+  }
+
+  /// Shopee-style banner: "Kéo xuống để xem livestream". Only rendered
+  /// when this shop has an active live session — tap navigates straight
+  /// into LiveStreamScreen.
+  Widget _buildLiveBanner() {
+    return GestureDetector(
+      onTap: _openLive,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+            vertical: AppSizes.sm, horizontal: AppSizes.md),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              AppColors.liveRed.withValues(alpha: 0.92),
+              const Color(0xFFFF6B35).withValues(alpha: 0.92),
+            ],
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+          ),
+        ),
+        child: Row(
+          children: [
+            // Pulsing dot + LIVE pill — same visual language as the live
+            // tab cards so the user immediately recognizes it.
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.25),
+                borderRadius: BorderRadius.circular(AppSizes.radiusSm),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.circle, color: Colors.white, size: 7),
+                  SizedBox(width: 4),
+                  Text(
+                    'LIVE',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: AppSizes.sm),
+            const Expanded(
+              child: Text(
+                'Kéo xuống để xem livestream',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: AppSizes.fontSm,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const Icon(Icons.keyboard_arrow_down,
+                color: Colors.white, size: 22),
+          ],
+        ),
       ),
     );
   }

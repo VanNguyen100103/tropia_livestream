@@ -22,14 +22,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/api      ./cmd/ap
 
 # Runtime
 FROM alpine:3.20
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata && \
+    addgroup -S app -g 10001 && \
+    adduser  -S app -G app -u 10001 -h /app
 WORKDIR /app
-COPY --from=builder /out/api      /app/api
-COPY --from=builder /out/worker   /app/worker
-COPY --from=builder /out/migrate  /app/migrate
-COPY --from=builder /out/seed     /app/seed
+COPY --from=builder --chown=app:app /out/api      /app/api
+COPY --from=builder --chown=app:app /out/worker   /app/worker
+COPY --from=builder --chown=app:app /out/migrate  /app/migrate
+COPY --from=builder --chown=app:app /out/seed     /app/seed
 # Migrations folder is needed at runtime by /app/migrate
-COPY migrations/ /app/migrations/
+COPY --chown=app:app migrations/ /app/migrations/
+USER app:app
 EXPOSE 3000
 ENV PORT=3000
 ENTRYPOINT ["/app/api"]

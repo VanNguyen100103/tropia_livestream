@@ -9,27 +9,36 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/tropia/backend/internal/auth"
+	"github.com/tropia/backend/internal/cache"
 	"github.com/tropia/backend/internal/commerce"
 	"github.com/tropia/backend/internal/httpx"
 )
 
 type Handler struct {
 	orderRepo *commerce.OrderRepository
+	orderSvc  *commerce.OrderService
 	momo      *MoMo
 	vnpay     *VNPay
 	zalopay   *ZaloPay
 	clientURL string
 }
 
-func NewHandler(orderRepo *commerce.OrderRepository, momo *MoMo, vnpay *VNPay, zalopay *ZaloPay, clientURL string) *Handler {
-	return &Handler{orderRepo: orderRepo, momo: momo, vnpay: vnpay, zalopay: zalopay, clientURL: clientURL}
+func NewHandler(orderRepo *commerce.OrderRepository, orderSvc *commerce.OrderService, momo *MoMo, vnpay *VNPay, zalopay *ZaloPay, clientURL string) *Handler {
+	return &Handler{orderRepo: orderRepo, orderSvc: orderSvc, momo: momo, vnpay: vnpay, zalopay: zalopay, clientURL: clientURL}
 }
 
-func (h *Handler) Register(r *gin.RouterGroup, authMw gin.HandlerFunc) {
+func (h *Handler) Register(r *gin.RouterGroup, authMw gin.HandlerFunc, cc *cache.Cache) {
+	// Per-user rate limit on payment init so a stolen access token can't
+	// rip through 1000 init requests/sec hammering MoMo/VNPay/ZaloPay
+	// sandboxes (which charge per call in production).
+	payLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{
+		Limit: 10, WindowMs: 60 * 1000, FailClosed: false,
+	})
+
 	authed := r.Group("/", authMw)
-	authed.POST("/momo", h.initMoMo)
-	authed.POST("/vnpay", h.initVNPay)
-	authed.POST("/zalopay", h.initZaloPay)
+	authed.POST("/momo", payLimit, h.initMoMo)
+	authed.POST("/vnpay", payLimit, h.initVNPay)
+	authed.POST("/zalopay", payLimit, h.initZaloPay)
 
 	r.POST("/momo/ipn", h.momoIPN)
 	r.GET("/momo/callback", h.momoCallback)
@@ -88,7 +97,7 @@ func (h *Handler) momoIPN(c *gin.Context) {
 	if ipn.ResultCode == 0 {
 		orderID, err := uuid.Parse(ipn.OrderID)
 		if err == nil {
-			_ = h.orderRepo.MarkPaid(c.Request.Context(), orderID, "MoMo", strconv.FormatInt(ipn.TransID, 10))
+			_ = h.orderSvc.ConfirmPayment(c.Request.Context(), orderID, "MoMo", strconv.FormatInt(ipn.TransID, 10))
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "ok"})
@@ -100,7 +109,7 @@ func (h *Handler) momoCallback(c *gin.Context) {
 	status := "failed"
 	if resultCode == "0" {
 		if oid, err := uuid.Parse(orderID); err == nil {
-			_ = h.orderRepo.MarkPaid(c.Request.Context(), oid, "MoMo", c.Query("transId"))
+			_ = h.orderSvc.ConfirmPayment(c.Request.Context(), oid, "MoMo", c.Query("transId"))
 			status = "success"
 		}
 	}
@@ -144,7 +153,7 @@ func (h *Handler) vnpayReturn(c *gin.Context) {
 	status := "failed"
 	if respCode == "00" {
 		if oid, err := uuid.Parse(orderID); err == nil {
-			_ = h.orderRepo.MarkPaid(c.Request.Context(), oid, "VNPay", q.Get("vnp_TransactionNo"))
+			_ = h.orderSvc.ConfirmPayment(c.Request.Context(), oid, "VNPay", q.Get("vnp_TransactionNo"))
 			status = "success"
 		}
 	}
@@ -201,7 +210,7 @@ func (h *Handler) zaloPayCallback(c *gin.Context) {
 		return
 	}
 	if oid, err := uuid.Parse(res.OrderID); err == nil {
-		_ = h.orderRepo.MarkPaid(c.Request.Context(), oid, "ZaloPay", res.TxID)
+		_ = h.orderSvc.ConfirmPayment(c.Request.Context(), oid, "ZaloPay", res.TxID)
 	}
 	c.JSON(http.StatusOK, gin.H{"return_code": 1, "return_message": "success"})
 }

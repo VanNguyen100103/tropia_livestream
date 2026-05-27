@@ -536,10 +536,10 @@ func seedProducts(ctx context.Context, pool *pgxpool.Pool, attrIDs map[string]ma
 
 func seedLiveSession(ctx context.Context, pool *pgxpool.Pool) error {
 	const insertSession = `
-		INSERT INTO live_sessions (seller_id, title, description, category, agora_channel, status)
+		INSERT INTO live_sessions (seller_id, title, description, category, stream_key, status)
 		SELECT id, $1, $2, $3, $4, 'scheduled'
 		FROM profiles WHERE email = 'seller@tropia.test'
-		ON CONFLICT (agora_channel) DO UPDATE
+		ON CONFLICT (stream_key) DO UPDATE
 			SET title = EXCLUDED.title, description = EXCLUDED.description
 		RETURNING id
 	`
@@ -582,6 +582,46 @@ func seedLiveSession(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 
-	log.Printf("  ✓ live session %s (channel=%s, %d snapshot products)", sessID, channel, len(snapshots))
+	// Demo coupons attached to the session so the viewer's floating
+	// voucher popup ("Lưu") fires on entry — without these, vouchers is
+	// empty and LiveProvider.floatingVoucherId stays null.
+	const insertCoupon = `
+		INSERT INTO coupons (code, discount_type, discount_value, min_order_value, max_discount,
+		                      max_uses, expires_at, is_active, session_id, created_by)
+		SELECT $1, $2, $3, $4, $5, $6, NOW() + INTERVAL '30 days', TRUE, $7, p.id
+		FROM profiles p WHERE p.email = 'seller@tropia.test'
+		ON CONFLICT (code) DO UPDATE
+			SET discount_value  = EXCLUDED.discount_value,
+			    min_order_value = EXCLUDED.min_order_value,
+			    max_discount    = EXCLUDED.max_discount,
+			    max_uses        = EXCLUDED.max_uses,
+			    expires_at      = EXCLUDED.expires_at,
+			    is_active       = TRUE,
+			    session_id      = EXCLUDED.session_id
+	`
+	coupons := []struct {
+		code         string
+		discountType string
+		value        float64
+		minOrder     int
+		maxDiscount  *int
+		maxUses      *int
+	}{
+		{"TROPIA10", "percent", 10, 0, intPtr(50_000), intPtr(100)},
+		{"FRESH50K", "fixed", 50_000, 200_000, nil, intPtr(50)},
+		{"WELCOME20", "percent", 20, 100_000, intPtr(100_000), intPtr(200)},
+	}
+	for _, c := range coupons {
+		if _, err := pool.Exec(ctx, insertCoupon,
+			c.code, c.discountType, c.value, c.minOrder, c.maxDiscount, c.maxUses, sessID,
+		); err != nil {
+			return fmt.Errorf("coupon %s: %w", c.code, err)
+		}
+	}
+
+	log.Printf("  ✓ live session %s (channel=%s, %d snapshot products, %d coupons)",
+		sessID, channel, len(snapshots), len(coupons))
 	return nil
 }
+
+func intPtr(v int) *int { return &v }

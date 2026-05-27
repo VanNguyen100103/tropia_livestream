@@ -48,10 +48,14 @@ class CartItemModel {
   factory CartItemModel.fromJson(Map<String, dynamic> j) => CartItemModel(
         id:            j['id']           as String,
         variantId:     j['variant_id']   as String,
-        productId:     j['product_id']   as String,
-        productName:   j['product_name'] as String,
-        shopId:        j['shop_id']      as String,
-        shopName:      j['shop_name']    as String,
+        // Live items may have NULL product_id / shop_id / shop_name (no
+        // catalog product, no shop row for the seller). Fall back so the
+        // model never throws on parse — cart grouping treats '' shopId as
+        // "ungrouped".
+        productId:     (j['product_id']   as String?) ?? (j['variant_id'] as String),
+        productName:   (j['product_name'] as String?) ?? '',
+        shopId:        (j['shop_id']      as String?) ?? '',
+        shopName:      (j['shop_name']    as String?) ?? '',
         imageUrl:      j['image_url']    as String?,
         attributes:    (j['attributes'] as List? ?? [])
             .map((e) => CartAttribute.fromJson(e as Map<String, dynamic>))
@@ -84,9 +88,11 @@ class CartSummary {
     required this.totalSaving,
   });
 
+  // Backend returns snake_case (cart.go list handler). Keep camelCase
+  // fallbacks for transition / older builds.
   factory CartSummary.fromJson(Map<String, dynamic> j) => CartSummary(
-        totalItems:  (j['totalItems']  as num).toInt(),
-        totalPrice:  (j['totalPrice']  as num).toInt(),
-        totalSaving: (j['totalSaving'] as num).toInt(),
+        totalItems:  ((j['total_items']  ?? j['totalItems']  ?? 0) as num).toInt(),
+        totalPrice:  ((j['total_price']  ?? j['totalPrice']  ?? 0) as num).toInt(),
+        totalSaving: ((j['total_saving'] ?? j['totalSaving'] ?? 0) as num).toInt(),
       );
 }

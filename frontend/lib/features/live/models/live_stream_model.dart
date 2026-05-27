@@ -9,7 +9,7 @@
 //   - [LiveComment]: Bình luận của người xem
 //   - [LiveReward]: Phần thưởng / xu trong buổi live
 //   - [LiveVoucher]: Voucher/coupon được phát trong live
-//   - [LiveTab]: Enum cho các tab (Video / Live / Cho bạn)
+//   - [LiveTab]: Enum cho các tab (Video / Live / Theo dõi)
 //   - [StreamStatus]: Trạng thái luồng (live, ended, upcoming)
 //
 // THIẾT KẾ:
@@ -36,7 +36,9 @@ enum StreamStatus {
 enum LiveTab {
   video,
   live,
-  forYou,
+  // Shopee-style: only streams from shops the buyer already follows. Live
+  // ones first, then ended (so the user can catch a VOD they missed).
+  following,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

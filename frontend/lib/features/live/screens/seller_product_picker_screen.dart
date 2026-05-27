@@ -452,11 +452,15 @@ class _SellerProductPickerScreenState
     final allSelected = _allVisibleSelected;
 
     return Container(
+      // Scaffold(resizeToAvoidBottomInset: true) already shrinks the body
+      // when the keyboard opens, so we MUST NOT add viewInsets.bottom here
+      // — that would double-count the keyboard and overflow the Column.
+      // We only need padding.bottom (gesture nav bar / home indicator).
       padding: EdgeInsets.fromLTRB(
         AppSizes.md,
         AppSizes.sm,
         AppSizes.md,
-        AppSizes.sm + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).padding.bottom,
+        AppSizes.sm + MediaQuery.of(context).padding.bottom,
       ),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -796,16 +800,32 @@ class _QuickCreateProductDialogState extends State<_QuickCreateProductDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Tạo sản phẩm mới', style: TextStyle(fontWeight: FontWeight.w700)),
-      contentPadding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-      content: Form(
-        key: _formKey,
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 500),
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(24, 20, 24, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Tạo sản phẩm mới',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 20),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
               // ── Image picker ──────────────────────────────────────────────
               GestureDetector(
                 onTap: _pickingImage ? null : _pickImage,
@@ -954,32 +974,42 @@ class _QuickCreateProductDialogState extends State<_QuickCreateProductDialog> {
                       ),
                     ),
                   ),
-                ],
+                    ],
+                  ),
+                    ],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Huỷ'),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: _submitting ? null : _submit,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: Colors.white,
+                      ),
+                      child: _submitting
+                          ? const SizedBox(
+                              width: 18, height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            )
+                          : const Text('Tạo & Chọn'),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
         ),
       ),
-      actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Huỷ'),
-        ),
-        ElevatedButton(
-          onPressed: _submitting ? null : _submit,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.primary,
-            foregroundColor: Colors.white,
-          ),
-          child: _submitting
-              ? const SizedBox(
-                  width: 18, height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                )
-              : const Text('Tạo & Chọn'),
-        ),
-      ],
     );
   }
 }

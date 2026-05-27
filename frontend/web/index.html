@@ -4,6 +4,26 @@
   <base href="$FLUTTER_BASE_HREF">
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+
+  <!-- Content-Security-Policy is set at the production edge (Nginx/Cloudflare),
+       NOT here. Flutter web's debug-mode DDC injects inline <script> nodes
+       for hot-reload, which any strict meta CSP would block — leaving the
+       page blank in `flutter run -d chrome`. The release build (dart2js)
+       has no inline scripts, so the production proxy can serve the strict
+       policy unchanged. Reference policy to apply at the edge:
+         default-src 'self';
+         script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://www.gstatic.com;
+         style-src 'self' 'unsafe-inline';
+         img-src 'self' data: blob: https:;
+         font-src 'self' data: https://fonts.gstatic.com;
+         connect-src 'self' https: wss:;
+         media-src 'self' blob: https:;
+         worker-src 'self' blob:;
+         frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none';
+       Backend already sets X-Frame-Options: DENY on API responses
+       (see httpx/middleware.go) as a belt-and-braces measure. -->
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+
   <meta name="description" content="Tropia fresh grocery app with Live shopping">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
@@ -20,6 +40,21 @@
       object-fit: cover;
     }
   </style>
+
+  <!-- hls.js polyfill: Chrome / Firefox / Edge can't decode HLS natively
+       (only Safari can). HlsViewer's web impl attaches an Hls() instance to
+       a <video> when window.Hls is available; falls back to <video src=…>
+       otherwise (Safari + iOS). Pinned to a known-good version + SRI hash
+       (sha384 of dist/hls.min.js@1.5.13) so a compromised CDN cannot
+       inject arbitrary JS into our origin. crossorigin is required for
+       the browser to enforce the integrity check on a cross-origin load.
+       To bump the version: download the new file, run
+         openssl dgst -sha384 -binary hls.min.js | openssl base64 -A
+       and replace both the URL and integrity value below. -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"
+          integrity="sha384-w6Gb3fXHb5e1LUYa/hYA5Q41bEDglN5ZPCG7Jvnoo8/X90oGnlPqBlBJCe38mEMm"
+          crossorigin="anonymous"
+          referrerpolicy="no-referrer"></script>
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>

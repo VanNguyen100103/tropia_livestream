@@ -68,7 +68,21 @@ class _LiveChatWidgetState extends State<LiveChatWidget> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.comments.isEmpty) return const SizedBox.shrink();
+    if (widget.comments.isEmpty) {
+      // Soft placeholder so the chat area isn't blank — both host and
+      // viewer see "Chưa có tin nhắn nào" until somebody types.
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSizes.sm, vertical: AppSizes.sm),
+        child: Text(
+          'Chưa có tin nhắn nào',
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.55),
+            fontSize: AppSizes.fontSm,
+            shadows: const [Shadow(color: Colors.black, blurRadius: 4)],
+          ),
+        ),
+      );
+    }
 
     return SizedBox(
       height: widget.maxHeight,

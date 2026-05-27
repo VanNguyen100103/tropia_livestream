@@ -3,15 +3,24 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'package:tropia/core/config/app_config.dart';
 import 'package:tropia/core/constants/app_constants.dart';
+import 'package:pointer_interceptor/pointer_interceptor.dart';
+import 'package:tropia/core/services/auth_service.dart';
 import 'package:tropia/features/live/data/live_repository.dart';
 import 'package:tropia/features/live/models/live_stream_model.dart';
 import 'package:tropia/features/live/providers/live_provider.dart';
 import 'package:tropia/features/live/widgets/hls_viewer.dart';
 import 'package:tropia/features/live/widgets/live_actions_widget.dart';
 import 'package:tropia/features/live/widgets/live_chat_widget.dart';
+import 'package:tropia/features/live/widgets/live_floating_voucher_widget.dart';
+import 'package:tropia/features/live/widgets/live_mini_cart_bag.dart';
 import 'package:tropia/features/live/widgets/live_product_card_widget.dart';
 import 'package:tropia/features/live/widgets/live_product_popup.dart';
+import 'package:tropia/features/shop/screens/shop_detail_screen.dart';
+
+import '../widgets/viewer_unload_hook_stub.dart'
+    if (dart.library.js_interop) '../widgets/viewer_unload_hook_web.dart';
 
 /// Full viewer screen for an SRS live stream.
 ///
@@ -39,6 +48,7 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
   LiveStream? _stream;
 
   late final LiveProvider _provider;
+  ViewerUnloadHook? _unloadHook;
 
   @override
   void initState() {
@@ -54,8 +64,22 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
       final playback = res['playback'] as Map<String, dynamic>;
       final hls = (playback['hls'] as String?) ?? '';
 
-      await LiveRepository.instance.joinAsViewer(widget.streamId);
+      // joinAsViewer is handled inside openStream (it does WS-connect →
+      // POST /join → /stats refresh in the right order so the first
+      // stats push isn't missed). Calling it here too would double-
+      // insert a live_viewers row (ON CONFLICT DO NOTHING absorbs it)
+      // and, worse, fire /join BEFORE the WS subscribes → counter
+      // sticks at 0 on this client.
       await _provider.openStream(widget.streamId);
+
+      // Web only: register a pagehide/beforeunload handler that fires the
+      // /leave call even if the user closes the tab or hits F5 instead of
+      // tapping the back button (both bypass State.dispose on Flutter web,
+      // leaving viewer_count stuck on the host overlay).
+      _unloadHook = installViewerUnloadHook(
+        url: '${AppConfig.apiLive}/${widget.streamId}/leave',
+        bearerToken: AuthService.instance.accessToken,
+      );
 
       if (!mounted) return;
       setState(() {
@@ -80,9 +104,35 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
     Navigator.of(context).maybePop();
   }
 
+  /// Re-resolve the HLS playback URL before the player rebuilds. Used by
+  /// HlsViewer's "Thử lại" button on web — without this, retry just
+  /// reattached hls.js to the same stale URL and immediately errored
+  /// again, which is why the button felt broken.
+  Future<void> _refetchPlayback() async {
+    try {
+      final res = await LiveRepository.instance.fetchPlayback(widget.streamId);
+      final playback = res['playback'] as Map<String, dynamic>;
+      final hls = (playback['hls'] as String?) ?? '';
+      if (!mounted) return;
+      if (hls.isEmpty) {
+        // Session likely ended or SRS dropped the publisher. Surface the
+        // same "buổi live đã kết thúc" path the stats poller uses instead
+        // of looping the user back through Thử lại forever.
+        _handleSessionEnded();
+        return;
+      }
+      setState(() => _hlsUrl = hls);
+    } catch (_) {
+      if (!mounted) return;
+      _handleSessionEnded();
+    }
+  }
+
   @override
   void dispose() {
     _provider.onSessionEnded = null;
+    _unloadHook?.dispose();
+    _unloadHook = null;
     LiveRepository.instance.leaveAsViewer(widget.streamId).catchError((_) {});
     _provider.closeStream();
     super.dispose();
@@ -128,7 +178,10 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
           children: [
             // Video
             if (_hlsUrl != null)
-              HlsViewer(hlsUrl: _hlsUrl!)
+              HlsViewer(
+                hlsUrl: _hlsUrl!,
+                onRetry: _refetchPlayback,
+              )
             else
               Container(
                 color: Colors.black,
@@ -144,20 +197,54 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
               top: 12,
               left: 12,
               right: 12,
-              child: _TopBar(stream: stream),
+              child: _TopBar(
+                stream: stream,
+                onFollowTap: () => provider.toggleFollow(stream.id),
+              ),
             ),
 
-            // Pinned product card (bottom-left, above chat)
-            if (stream.products.isNotEmpty)
+            // Shopee Live "GẶP LÊN" banner — when the host pins one
+            // product to highlight ("đang giới thiệu"), it floats above
+            // the regular product carousel with a pulsing badge so
+            // viewers immediately know which item is being demoed.
+            if (stream.primaryPinnedProduct != null && stream.pinnedProductIds.isNotEmpty)
               Positioned(
                 left: 12,
-                bottom: 220,
-                width: 220,
-                child: LiveProductCardWidget(
-                  product: stream.products.first,
-                  streamId: stream.id,
-                  onTap: () => _showProductPopup(stream.products.first, stream.id),
-                  onBuyNow: () => provider.buyNow(stream.id, stream.products.first.id),
+                right: 80,
+                top: 70,
+                child: _PinnedSpotlight(
+                  product: stream.primaryPinnedProduct!,
+                  onTap: () => _showProductPopup(stream.primaryPinnedProduct!, stream.id),
+                  onBuyNow: () => provider.buyNow(stream.id, stream.primaryPinnedProduct!.id),
+                ),
+              ),
+
+            // Pinned product carousel on the left edge, Shopee Live
+            // style. Sits high on the screen (just below the shop
+            // bar) and extends down to ~bottom 120 so viewers can
+            // scroll multiple pinned items without the column eating
+            // half the video. Width is tight (110) to match the
+            // compact 96px card + scroll padding.
+            if (stream.products.isNotEmpty)
+              Positioned(
+                left: 8,
+                top: stream.primaryPinnedProduct != null ? 150 : 70,
+                bottom: 120,
+                width: 110,
+                child: ListView.separated(
+                  padding: EdgeInsets.zero,
+                  itemCount: stream.products.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 6),
+                  itemBuilder: (_, i) {
+                    final p = stream.products[i];
+                    return LiveProductCardWidget(
+                      product: p,
+                      streamId: stream.id,
+                      onTap: () => _showProductPopup(p, stream.id),
+                      onBuyNow: () => provider.buyNow(stream.id, p.id),
+                      onAddToCart: () => _addToCart(p),
+                    );
+                  },
                 ),
               ),
 
@@ -174,21 +261,200 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
               ),
             ),
 
-            // Chat at bottom
+            // Floating "túi đồ live" bag — bottom-left, just below the
+            // product carousel column (which terminates at bottom:120).
+            // Sits at the same horizontal column as the product cards
+            // so the visual relationship "carousel → bag" reads as
+            // "things you've grabbed from this live". Shopee Live uses
+            // the same anchor point. Wrapped in PointerInterceptor so
+            // taps don't fall through to the scrim's IgnorePointer
+            // sibling rendered below it in the Stack.
+            Positioned(
+              left: 12,
+              bottom: 145,
+              child: PointerInterceptor(
+                child: LiveMiniCartBag(streamId: stream.id),
+              ),
+            ),
+
+            // Chat + suggestion chips + input bar at bottom.
+            // Gradient scrim from fully transparent at the top to ~70%
+            // black at the bottom keeps the chat bubbles + input legible
+            // even when the host is streaming a bright background (white
+            // wall, daylight) where black-on-white text would be lost.
+            //
+            // The scrim Container is wrapped in IgnorePointer because
+            // its BoxDecoration is opaque to hit-tests across its full
+            // width. Stack hit-tests last-child-first, so without this
+            // the scrim would eat every tap in its rect — including
+            // the heart/share/follow buttons in LiveActionsWidget,
+            // which sit at bottom:120 (well inside the scrim's
+            // vertical extent). The two PointerInterceptor children
+            // (chips + composer) re-enable hit-testing for the only
+            // interactive pieces in this layer.
+            // Layer A — visual-only chat list + scrim. IgnorePointer
+            // because the decorated Container otherwise eats every tap
+            // in its full-width rect (heart/share/follow at bottom:120
+            // are inside its vertical range; chat messages don't need
+            // taps; the dead space between chat bubbles and the
+            // composer is pure gradient). Interactive pieces live in
+            // Layer B below.
             Positioned(
               left: 0,
               right: 0,
               bottom: 0,
-              child: Container(
-                color: Colors.black.withValues(alpha: 0.25),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: LiveChatWidget(comments: stream.comments),
+              child: IgnorePointer(
+                ignoring: true,
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      stops: const [0.0, 0.35, 1.0],
+                      colors: [
+                        Colors.transparent,
+                        Colors.black.withValues(alpha: 0.45),
+                        Colors.black.withValues(alpha: 0.75),
+                      ],
+                    ),
+                  ),
+                  padding: const EdgeInsets.fromLTRB(12, 24, 12, 8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      LiveChatWidget(comments: stream.comments),
+                      // Reserve the same vertical footprint the
+                      // interactive layer (chips + composer) occupies
+                      // so the gradient extends behind them visually.
+                      // Heights mirror Layer B: chips row 32, composer
+                      // 44, plus the gaps used there (4 + 6) and the
+                      // bottom padding (8).
+                      SizedBox(
+                        height: (provider.aiSuggestions.isNotEmpty
+                                ? (4.0 + 32.0)
+                                : 0.0) +
+                            6.0 +
+                            44.0 +
+                            8.0,
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
+
+            // Layer B — interactive chips + composer. Sits at higher
+            // z than the scrim so taps land here; PointerInterceptor
+            // routes the click through the HTML <video> stacking
+            // context on Flutter web.
+            Positioned(
+              left: 12,
+              right: 12,
+              bottom: 8,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (provider.aiSuggestions.isNotEmpty) ...[
+                    PointerInterceptor(
+                      child: _SuggestionChipsRow(
+                        suggestions: provider.aiSuggestions,
+                        onTap: (q) => provider.sendComment(stream.id, q),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                  ],
+                  PointerInterceptor(
+                    child: _ChatComposer(
+                      onSubmit: (text) => provider.sendComment(stream.id, text),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // Floating voucher banner (entry banner). Shown when provider has
+            // a non-null floatingVoucherId for this stream.
+            if (provider.floatingVoucherId != null && stream.vouchers.isNotEmpty)
+              Builder(builder: (_) {
+                final vId = provider.floatingVoucherId;
+                LiveVoucher? v;
+                for (final x in stream.vouchers) {
+                  if (x.id == vId) { v = x; break; }
+                }
+                v ??= stream.vouchers.first;
+                // Cap the banner at 360 px so it doesn't stretch the full
+                // width of a desktop browser. On mobile the screen is
+                // narrower than 360 so this is a no-op there.
+                // Banner sits ABOVE the chat composer + suggestion
+                // chips. Chat scrim takes ~chat(180) + chips(32) +
+                // composer(44) + padding ≈ 290px from bottom, so anchor
+                // the banner at bottom:300 to clear it. If we don't,
+                // the 360×~80 banner rect overlaps the chips/composer
+                // and — because Stack hit-tests last-child-first — the
+                // banner (even mid-dismiss with opacity≈0) eats taps,
+                // making the input and chips look broken.
+                return Positioned(
+                  left: 12,
+                  bottom: 300,
+                  width: 360,
+                  child: LiveFloatingVoucherWidget(
+                    voucher: v,
+                    shopName: stream.sellerName,
+                    shopLogoUrl: stream.sellerAvatarUrl,
+                    onSave: () {
+                      provider.saveVoucher(stream.id, v!.id);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Đã lưu mã ${v.code}'),
+                          duration: const Duration(seconds: 2),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                    },
+                    onDismiss: () => provider.dismissFloatingVoucher(),
+                  ),
+                );
+              }),
           ],
         );
       },
     );
+  }
+
+  /// Add-to-cart shortcut from the live card. Uses the provider's
+  /// addSkuToCart with skuId=null so it routes through the live-add
+  /// endpoint (the row gets cart_items.variant_id = live_session_products.id
+  /// — see CLAUDE.md note on the overload). Variant products are
+  /// short-circuited by the card itself: they open the SKU picker
+  /// instead of calling this, because we can't put a multi-SKU product
+  /// in the cart without a chosen variant.
+  Future<void> _addToCart(LiveProduct product) async {
+    final stream = _provider.currentStream;
+    if (stream == null) return;
+    if (!AuthService.instance.isSignedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Đăng nhập để thêm vào giỏ hàng')),
+      );
+      return;
+    }
+    try {
+      await _provider.addSkuToCart(stream.id, product.id, null, 1);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Đã thêm "${product.name}" vào giỏ'),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Không thêm được: $e')),
+      );
+    }
   }
 
   void _showProductPopup(LiveProduct product, String streamId) {
@@ -222,7 +488,21 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
 
 class _TopBar extends StatelessWidget {
   final LiveStream stream;
-  const _TopBar({required this.stream});
+  final VoidCallback onFollowTap;
+  const _TopBar({required this.stream, required this.onFollowTap});
+
+  void _openShop(BuildContext context) {
+    // Prefer shopId (Shop UUID) — that's what ShopDetailScreen.getBySlug
+    // expects. Falls back to sellerId so legacy streams without a shop
+    // record still navigate somewhere instead of dead-ending.
+    final shopRef = stream.shopId ?? stream.sellerId;
+    if (shopRef.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ShopDetailScreen(shopId: shopRef),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -241,36 +521,55 @@ class _TopBar extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 10),
-        ClipOval(
-          child: Image.network(
-            stream.sellerAvatarUrl,
-            width: 36,
-            height: 36,
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => Container(
-              width: 36, height: 36, color: Colors.grey,
-              child: const Icon(Icons.person, color: Colors.white70),
+        // Avatar + tên shop là tap target để mở Shop Detail (Shopee-style).
+        // Gộp 2 widget vào một GestureDetector để tap vùng nào của cụm
+        // shop info cũng navigate được.
+        GestureDetector(
+          onTap: () => _openShop(context),
+          behavior: HitTestBehavior.opaque,
+          child: ClipOval(
+            child: Image.network(
+              stream.sellerAvatarUrl,
+              width: 36,
+              height: 36,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(
+                width: 36, height: 36, color: Colors.grey,
+                child: const Icon(Icons.person, color: Colors.white70),
+              ),
             ),
           ),
         ),
         const SizedBox(width: 8),
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                stream.sellerName,
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                overflow: TextOverflow.ellipsis,
-              ),
-              Text(
-                '${_formatViewers(stream.viewerCount)} đang xem',
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
-              ),
-            ],
+          child: GestureDetector(
+            onTap: () => _openShop(context),
+            behavior: HitTestBehavior.opaque,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  stream.sellerName,
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  '${_formatViewers(stream.viewerCount)} đang xem',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+              ],
+            ),
           ),
         ),
+        // Shopee-style inline follow pill — primary CTA the viewer sees
+        // before they even reach the side toolbar. Hides once the user
+        // already follows the shop so it doesn't waste space.
+        if (!stream.isFollowing) ...[
+          const SizedBox(width: 6),
+          _FollowPill(onTap: onFollowTap),
+        ],
+        const SizedBox(width: 6),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
@@ -289,6 +588,40 @@ class _TopBar extends StatelessWidget {
   String _formatViewers(int n) {
     if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}k';
     return '$n';
+  }
+}
+
+class _FollowPill extends StatelessWidget {
+  final VoidCallback onTap;
+  const _FollowPill({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: AppColors.liveRed,
+          borderRadius: BorderRadius.circular(AppSizes.radiusFull),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.add, color: Colors.white, size: 14),
+            SizedBox(width: 2),
+            Text(
+              'Theo dõi',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -315,6 +648,340 @@ class _ErrorState extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             ElevatedButton(onPressed: onRetry, child: const Text('Thử lại')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat composer + DeepSeek suggestion chips
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SuggestionChipsRow extends StatelessWidget {
+  final List<String> suggestions;
+  final void Function(String) onTap;
+
+  const _SuggestionChipsRow({required this.suggestions, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 32,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: suggestions.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 6),
+        itemBuilder: (_, i) {
+          final q = suggestions[i];
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => onTap(q),
+              borderRadius: BorderRadius.circular(AppSizes.radiusFull),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(AppSizes.radiusFull),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.3),
+                    width: 1,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.auto_awesome,
+                      color: AppColors.gold.withValues(alpha: 0.9),
+                      size: 11,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      q,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ChatComposer extends StatefulWidget {
+  final void Function(String) onSubmit;
+  const _ChatComposer({required this.onSubmit});
+
+  @override
+  State<_ChatComposer> createState() => _ChatComposerState();
+}
+
+class _ChatComposerState extends State<_ChatComposer> {
+  final _controller = TextEditingController();
+  final _focus = FocusNode();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final t = _controller.text.trim();
+    if (t.isEmpty) return;
+    widget.onSubmit(t);
+    _controller.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Container(
+            height: 42,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: BoxDecoration(
+              // Frosted-dark pill: 55% black so chat bubbles + video both
+              // bleed through subtly, but the input still has enough
+              // contrast against white walls / daylight backgrounds that
+              // the user reported washed out earlier. White hairline border
+              // for the Shopee Live look.
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(AppSizes.radiusFull),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.35),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.chat_bubble_outline_rounded,
+                  color: Colors.white.withValues(alpha: 0.7),
+                  size: 16,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    focusNode: _focus,
+                    cursorColor: Colors.white,
+                    cursorWidth: 1.5,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      // Web's <input> defaults inject Chrome's autofill /
+                      // platform background. Disable decoration explicitly
+                      // by letting the parent Container draw the bg and
+                      // forcing the field to be a plain transparent text
+                      // surface — that's why we kept seeing a white box
+                      // despite setting a dark color in the decoration.
+                    ),
+                    decoration: InputDecoration(
+                      hintText: 'Bình luận trực tiếp...',
+                      hintStyle: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.55),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                      ),
+                      border: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      filled: false,
+                      isDense: true,
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _submit(),
+                    onChanged: (_) => setState(() {}), // refresh send btn glow
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        // Send button: gradient pill that brightens once there's text.
+        // Bigger tap target (44×44) so it's reachable on phones without
+        // hunting the thumb.
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: _controller.text.trim().isEmpty
+                  ? [
+                      AppColors.primary.withValues(alpha: 0.45),
+                      AppColors.primary.withValues(alpha: 0.45),
+                    ]
+                  : const [AppColors.primary, AppColors.primaryLight],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            shape: BoxShape.circle,
+            boxShadow: _controller.text.trim().isEmpty
+                ? null
+                : [
+                    BoxShadow(
+                      color: AppColors.primary.withValues(alpha: 0.45),
+                      blurRadius: 10,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            shape: const CircleBorder(),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: _submit,
+              child: const Icon(Icons.send_rounded, color: Colors.white, size: 18),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Shopee Live-style "GẶP LÊN" spotlight banner shown above the product
+/// carousel when the host pins one product. Bigger thumbnail + animated
+/// "ĐANG GIỚI THIỆU" label so viewers immediately spot the item being
+/// demoed. Tapping the banner opens the same product popup as the
+/// carousel cards; the inline "Mua" button is for one-tap checkout.
+class _PinnedSpotlight extends StatefulWidget {
+  final LiveProduct product;
+  final VoidCallback onTap;
+  final VoidCallback onBuyNow;
+  const _PinnedSpotlight({
+    required this.product,
+    required this.onTap,
+    required this.onBuyNow,
+  });
+
+  @override
+  State<_PinnedSpotlight> createState() => _PinnedSpotlightState();
+}
+
+class _PinnedSpotlightState extends State<_PinnedSpotlight>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.product;
+    return GestureDetector(
+      onTap: widget.onTap,
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFFF4D4F), width: 1.5),
+        ),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.network(
+                p.imageUrl,
+                width: 56, height: 56, fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Container(
+                  width: 56, height: 56, color: Colors.white12,
+                  child: const Icon(Icons.image_not_supported, size: 20, color: Colors.white54),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FadeTransition(
+                    opacity: Tween<double>(begin: 0.55, end: 1.0).animate(_pulse),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF4D4F),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text(
+                        'ĐANG GIỚI THIỆU',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    p.name,
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${p.salePrice.toInt()}đ',
+                    style: const TextStyle(
+                      color: Color(0xFFFFD54F),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            ElevatedButton(
+              onPressed: widget.onBuyNow,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFF4D4F),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                minimumSize: const Size(0, 0),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text(
+                'Mua',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+              ),
+            ),
           ],
         ),
       ),

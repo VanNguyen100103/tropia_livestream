@@ -1,8 +1,14 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
+import 'package:video_player/video_player.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 import 'package:tropia/core/constants/app_constants.dart';
 import 'package:tropia/features/live/models/live_stream_model.dart';
+
+import 'hls_viewer_web_stub.dart'
+    if (dart.library.js_interop) 'hls_viewer_web.dart';
 
 // Shopee-style full-width live card:
 //   Row 1: avatar (ring đỏ nếu live) + tên + verified + viewer count + nút Theo dõi
@@ -227,20 +233,32 @@ class LiveCardWidget extends StatelessWidget {
   // ── Thumbnail 16:9 full-width ─────────────────────────────────────────────
 
   Widget _buildThumbnail() {
-    final featured = stream.products.isNotEmpty ? stream.products.first : null;
+    final hlsUrl   = stream.streamUrl;
+    final isLive   = stream.status == StreamStatus.live;
+    final canAutoplay = isLive && hlsUrl != null && hlsUrl.isNotEmpty;
 
     return AspectRatio(
       aspectRatio: 16 / 9,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // Ảnh/video thumbnail
-          CachedNetworkImage(
-            imageUrl: stream.thumbnailUrl,
-            fit: BoxFit.cover,
-            placeholder: (_, __) => _buildShimmer(),
-            errorWidget: (_, __, ___) => _buildGradientFallback(),
-          ),
+          // Auto-playing muted HLS preview when live; otherwise just
+          // the cover image. Wrapped in a VisibilityDetector so a card
+          // off-screen tears the video down (saves bandwidth / CPU).
+          if (canAutoplay)
+            _LivePreviewVideo(
+              key: ValueKey(hlsUrl),
+              hlsUrl: hlsUrl,
+              posterUrl: stream.thumbnailUrl,
+              gradientFallback: _buildGradientFallback,
+            )
+          else
+            CachedNetworkImage(
+              imageUrl: stream.thumbnailUrl,
+              fit: BoxFit.cover,
+              placeholder: (_, __) => _buildShimmer(),
+              errorWidget: (_, __, ___) => _buildGradientFallback(),
+            ),
 
           // Gradient overlay dưới
           Positioned(
@@ -304,12 +322,25 @@ class LiveCardWidget extends StatelessWidget {
             ),
           ),
 
-          // Featured product — góc dưới trái (giống Shopee)
-          if (featured != null)
+          // Pinned products carousel — góc dưới, scroll ngang khi host
+          // ghim nhiều SP. Trước đây chỉ hiện 1 SP featured nên buyer không
+          // thấy được host đang bán những gì khác.
+          if (stream.products.isNotEmpty)
             Positioned(
-              left: AppSizes.sm,
+              left: 0,
+              right: 0,
               bottom: 28,
-              child: _FeaturedProductBadge(product: featured),
+              child: SizedBox(
+                height: 100,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: AppSizes.sm),
+                  itemCount: stream.products.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (_, i) =>
+                      _FeaturedProductBadge(product: stream.products[i]),
+                ),
+              ),
             ),
         ],
       ),
@@ -467,5 +498,188 @@ class _FeaturedProductBadge extends StatelessWidget {
       buf.write(s[i]);
     }
     return '${buf.toString()}đ';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-playing muted HLS preview for list cards (TikTok feed style)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Loads only when ≥50% of the card is visible on screen and tears down when
+// it scrolls away. Always muted — viewer taps the card to open full-screen
+// with sound. While the player is initializing or the stream is offline the
+// poster image is shown so the layout never flashes black.
+//
+// ONE-AT-A-TIME RULE (web): SRS responds with `Connection: close` on every
+// HLS request, and hls.js makes ~1 request/sec. Five card previews running
+// in parallel were exhausting Windows' ephemeral TCP port pool
+// (ERR_ADDRESS_IN_USE in Chrome's console). The static [_PreviewSlot]
+// holds the single most-visible card; less-visible cards get evicted to
+// poster mode so we keep one steady connection instead of five churning.
+
+class _PreviewSlot {
+  static _LivePreviewVideoState? _holder;
+  static double _holderFraction = 0;
+
+  static void claim(_LivePreviewVideoState s, double fraction) {
+    // Same widget re-asserting itself — just update the fraction.
+    if (_holder == s) {
+      _holderFraction = fraction;
+      return;
+    }
+    // Slot already taken by a more-visible card. Caller stays in poster
+    // mode until either it scrolls more into view or the current holder
+    // releases.
+    if (_holder != null && _holderFraction >= fraction) {
+      return;
+    }
+    _holder?.forceStop();
+    _holder = s;
+    _holderFraction = fraction;
+    s.actuallyStart();
+  }
+
+  static void release(_LivePreviewVideoState s) {
+    if (_holder == s) {
+      _holder = null;
+      _holderFraction = 0;
+    }
+  }
+}
+class _LivePreviewVideo extends StatefulWidget {
+  final String hlsUrl;
+  final String posterUrl;
+  final Widget Function() gradientFallback;
+
+  const _LivePreviewVideo({
+    super.key,
+    required this.hlsUrl,
+    required this.posterUrl,
+    required this.gradientFallback,
+  });
+
+  @override
+  State<_LivePreviewVideo> createState() => _LivePreviewVideoState();
+}
+
+class _LivePreviewVideoState extends State<_LivePreviewVideo> {
+  VideoPlayerController? _ctrl;
+  bool _ready = false;
+  bool _failed = false;
+  bool _visible = false;
+
+  /// Spin the player up. On web that's just flipping `_visible` to true so
+  /// the build method renders [HlsViewerWeb]; on mobile it actually opens
+  /// the video_player network connection.
+  Future<void> actuallyStart() async {
+    if (kIsWeb) {
+      if (mounted) setState(() => _visible = true);
+      return;
+    }
+    if (_ctrl != null) return;
+    try {
+      final ctrl = VideoPlayerController.networkUrl(Uri.parse(widget.hlsUrl));
+      _ctrl = ctrl;
+      await ctrl.initialize();
+      await ctrl.setVolume(0);
+      await ctrl.setLooping(true);
+      await ctrl.play();
+      if (mounted) setState(() => _ready = true);
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  /// Counterpart to [actuallyStart]. Called by [_PreviewSlot] when a more-
+  /// visible card displaces us, and by [dispose] for cleanup.
+  ///
+  /// [notify] is false when called from `dispose()` — at that point the
+  /// element is about to be defunct and `setState` would trigger
+  /// `_lifecycleState != _ElementLifecycle.defunct` assertion. We still
+  /// update the bare fields so any in-flight build doesn't see stale
+  /// values, but skip the notify.
+  Future<void> forceStop({bool notify = true}) async {
+    if (kIsWeb) {
+      _visible = false;
+      if (notify && mounted) setState(() {});
+      return;
+    }
+    final c = _ctrl;
+    _ctrl = null;
+    _ready = false;
+    if (notify && mounted) setState(() {});
+    try { await c?.pause(); } catch (_) {}
+    try { await c?.dispose(); } catch (_) {}
+  }
+
+  void _onVisibility(VisibilityInfo info) {
+    // VisibilityDetector can fire one last callback while we're being
+    // disposed (during ListView scroll). Drop those so the slot logic
+    // doesn't try to setState on a dead widget.
+    if (!mounted) return;
+    final fraction = info.visibleFraction;
+    // <50% visible: definitely poster mode, free the slot if we own it.
+    if (fraction <= 0.5) {
+      _PreviewSlot.release(this);
+      forceStop();
+      return;
+    }
+    // ≥50% visible: bid for the slot. claim() decides whether we actually
+    // get to play, based on whether we're more visible than the current
+    // holder. Less-visible cards stay in poster mode.
+    _PreviewSlot.claim(this, fraction);
+  }
+
+  @override
+  void dispose() {
+    _PreviewSlot.release(this);
+    // Fire-and-forget — we can't await an async method here, and the
+    // `notify: false` flavor doesn't touch setState, so it's safe to let
+    // the camera controller cleanup happen in the background.
+    forceStop(notify: false);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return VisibilityDetector(
+      key: Key('live-preview-${widget.hlsUrl}'),
+      onVisibilityChanged: _onVisibility,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Poster underneath — shown until video is ready, or forever if
+          // the stream is offline / errored.
+          CachedNetworkImage(
+            imageUrl: widget.posterUrl,
+            fit: BoxFit.cover,
+            placeholder: (_, __) => Container(color: Colors.black12),
+            errorWidget: (_, __, ___) => widget.gradientFallback(),
+          ),
+          if (kIsWeb && _visible)
+            // hls.js-backed muted autoplay loop. Browser autoplay policy
+            // allows muted videos to start without a user gesture.
+            HlsViewerWeb(
+              key: ValueKey('card-${widget.hlsUrl}'),
+              hlsUrl: widget.hlsUrl,
+              fit: BoxFit.cover,
+              autoplay: true,
+              muted: true,
+              loop: true,
+              posterUrl: widget.posterUrl,
+            )
+          else if (!kIsWeb && _ready && !_failed && _ctrl != null)
+            FittedBox(
+              fit: BoxFit.cover,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: _ctrl!.value.size.width > 0 ? _ctrl!.value.size.width : 360,
+                height: _ctrl!.value.size.height > 0 ? _ctrl!.value.size.height : 640,
+                child: VideoPlayer(_ctrl!),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }

@@ -29,6 +29,11 @@ type MoMoConfig struct {
 
 type MoMo struct{ cfg MoMoConfig }
 
+// paymentHTTPClient — bounded timeout so a stuck MoMo/ZaloPay endpoint
+// can't pin a request goroutine forever. 15s covers the slow-but-alive
+// case (sandbox under load) while killing genuinely dead connections.
+var paymentHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 func NewMoMo(cfg MoMoConfig) *MoMo { return &MoMo{cfg: cfg} }
 
 type MoMoCreateInput struct {
@@ -76,7 +81,7 @@ func (m *MoMo) Create(ctx context.Context, in MoMoCreateInput) (*MoMoCreateResul
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := paymentHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

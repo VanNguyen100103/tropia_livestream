@@ -14,6 +14,7 @@
 // =============================================================================
 
 import 'package:flutter/material.dart';
+import 'package:tropia/core/config/app_config.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MÀU SẮC
@@ -103,7 +104,7 @@ abstract class AppStrings {
   // Live & Video screen
   static const String liveTabVideo = 'Video';
   static const String liveTabLive = 'Live';
-  static const String liveTabForYou = 'Cho bạn';
+  static const String liveTabFollowing = 'Theo dõi';
   static const String liveViewers = 'người xem';
   static const String liveFollow = 'Theo dõi';
   static const String liveFollowing = 'Đang theo dõi';
@@ -222,8 +223,11 @@ abstract class AppSizes {
   static const double fontXxl = 22.0;
   static const double fontTitle = 26.0;
 
-  // Live screen specific
-  static const double productCardWidth = 130.0;
+  // Live screen specific. Was 130 — too wide on a phone (eats ~35%
+  // of the video). Shopee Live uses ~96 so the buyer can still see
+  // the host's face while a carousel of pinned items floats over the
+  // left edge.
+  static const double productCardWidth = 96.0;
   static const double rewardPanelWidth = 90.0;
   static const double bottomBarHeight = 56.0;
   static const double tabBarHeight = 40.0;
@@ -239,13 +243,16 @@ abstract class AppSizes {
 // ─────────────────────────────────────────────────────────────────────────────
 
 abstract class AppUrls {
-  // Placeholder images – chỉ dùng khi backend không trả về URL ảnh
-  static const String placeholderProduct =
-      'https://picsum.photos/seed/product/300/300';
-  static const String placeholderAvatar =
-      'https://picsum.photos/seed/avatar/100/100';
-  static const String placeholderBanner =
-      'https://picsum.photos/seed/banner/800/400';
+  // Placeholder images — only used when the backend doesn't return an image
+  // URL. Host is driven by AppConfig.placeholderImageBase so production can
+  // point to a self-hosted CDN instead of picsum.photos:
+  //   flutter build apk --dart-define=PLACEHOLDER_IMAGE_BASE_URL=https://cdn.tropia.vn
+  static String get placeholderProduct =>
+      '${AppConfig.placeholderImageBase}/seed/product/300/300';
+  static String get placeholderAvatar =>
+      '${AppConfig.placeholderImageBase}/seed/avatar/100/100';
+  static String get placeholderBanner =>
+      '${AppConfig.placeholderImageBase}/seed/banner/800/400';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,4 +269,12 @@ abstract class AppDurations {
   static const Duration commentScroll = Duration(milliseconds: 400);
   static const Duration emojiFloat = Duration(seconds: 2);
   static const Duration popupShow = Duration(milliseconds: 250);
+
+  // How often the Live tab re-fetches the active streams list. Long
+  // enough that we're not hammering /api/live/streams (~4 polls/min/
+  // viewer); short enough that an ended session disappears from the
+  // grid before the user notices a "1 đang xem" ghost card.
+  static const Duration liveListPoll = Duration(seconds: 15);
+  static const Duration liveStatsPoll = Duration(seconds: 5);
+  static const Duration liveChatPoll = Duration(seconds: 3);
 }

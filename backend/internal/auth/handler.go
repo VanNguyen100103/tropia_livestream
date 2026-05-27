@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/tropia/backend/internal/cache"
 	"github.com/tropia/backend/internal/httpx"
 )
 
@@ -16,6 +17,17 @@ type Handler struct {
 	deepLink   string
 	clientURL  string
 	cookieSecure bool
+}
+
+// devOnly returns the secret (OTP, reset token) only when running outside
+// release mode. In production the email worker is the sole channel that
+// gets these — exposing them in the API response let any caller with the
+// victim's email do an account takeover (CRITICAL: P0 security hole).
+func devOnly(secret string) string {
+	if gin.Mode() == gin.ReleaseMode {
+		return ""
+	}
+	return secret
 }
 
 type HandlerConfig struct {
@@ -32,15 +44,34 @@ func NewAPIHandler(svc *AuthService, cfg HandlerConfig) *Handler {
 	return &Handler{svc: svc, deepLink: deepLink, clientURL: cfg.ClientURL, cookieSecure: cfg.CookieSecure}
 }
 
-func (h *Handler) Register(r *gin.RouterGroup, authMw gin.HandlerFunc) {
-	r.POST("/register", h.register)
-	r.POST("/login", h.login)
+func (h *Handler) Register(r *gin.RouterGroup, authMw gin.HandlerFunc, cc *cache.Cache) {
+	// Rate limits per-route. KeyFunc defaults to (path + IP) for anon
+	// endpoints, which is what we want for brute-force protection. Limits
+	// are sliding-window via Redis Lua (see cache.Allow), so a burst of
+	// requests immediately after the window opens still gets throttled.
+	// fail-closed = true → if Redis is down the API rejects auth attempts
+	// instead of falling open (safer default for a sign-in surface).
+	loginLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{
+		Limit: 5, WindowMs: 60 * 1000, FailClosed: true,
+	})
+	registerLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{
+		Limit: 3, WindowMs: 5 * 60 * 1000, FailClosed: true,
+	})
+	otpLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{
+		Limit: 3, WindowMs: 60 * 1000, FailClosed: true,
+	})
+	forgotLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{
+		Limit: 3, WindowMs: 15 * 60 * 1000, FailClosed: true,
+	})
+
+	r.POST("/register", registerLimit, h.register)
+	r.POST("/login", loginLimit, h.login)
 	r.POST("/refresh", h.refresh)
 	r.POST("/logout", h.logout)
-	r.POST("/verify-otp", h.verifyOTP)
-	r.POST("/resend-verify-email", h.resendOTP)
-	r.POST("/forgot-password", h.forgotPassword)
-	r.POST("/reset-password", h.resetPassword)
+	r.POST("/verify-otp", otpLimit, h.verifyOTP)
+	r.POST("/resend-verify-email", otpLimit, h.resendOTP)
+	r.POST("/forgot-password", forgotLimit, h.forgotPassword)
+	r.POST("/reset-password", otpLimit, h.resetPassword)
 	r.GET("/google/exchange", h.googleExchange)
 
 	// authed
@@ -108,11 +139,11 @@ func (h *Handler) register(c *gin.Context) {
 		c.Error(err)
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{
-		"user": userToJSON(res.User),
-		// OTP returned only in dev — production should email it
-		"otp_dev": res.OTP,
-	})
+	resp := gin.H{"user": userToJSON(res.User)}
+	if otp := devOnly(res.OTP); otp != "" {
+		resp["otp_dev"] = otp
+	}
+	c.JSON(http.StatusCreated, resp)
 }
 
 type loginReq struct {
@@ -229,8 +260,8 @@ func (h *Handler) resendOTP(c *gin.Context) {
 		return
 	}
 	resp := gin.H{"message": "if account exists, an otp was sent"}
-	if otp != "" {
-		resp["otp_dev"] = otp
+	if otpDev := devOnly(otp); otpDev != "" {
+		resp["otp_dev"] = otpDev
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -247,8 +278,8 @@ func (h *Handler) forgotPassword(c *gin.Context) {
 		return
 	}
 	resp := gin.H{"message": "if account exists, reset link was sent"}
-	if token != "" {
-		resp["reset_token_dev"] = token
+	if tokenDev := devOnly(token); tokenDev != "" {
+		resp["reset_token_dev"] = tokenDev
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -276,14 +307,17 @@ func (h *Handler) resetPassword(c *gin.Context) {
 // /api/auth/google -> redirects to Google
 // (Implemented in oauth.go)
 
-// /api/auth/google/exchange?code=XXX -> deep-link exchange
+// /api/auth/google/exchange?code=XXX[&code_verifier=YYY] -> deep-link exchange.
+// code_verifier is required iff the mobile client passed a code_challenge
+// when opening /api/auth/google (PKCE — RFC 7636).
 func (h *Handler) googleExchange(c *gin.Context) {
 	code := strings.TrimSpace(c.Query("code"))
 	if code == "" {
 		c.Error(httpx.NewValidation("missing code", nil))
 		return
 	}
-	access, refresh, err := h.svc.ExchangeOTC(c.Request.Context(), code)
+	verifier := strings.TrimSpace(c.Query("code_verifier"))
+	access, refresh, err := h.svc.ExchangeOTC(c.Request.Context(), code, verifier)
 	if err != nil {
 		c.Error(err)
 		return

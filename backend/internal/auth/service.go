@@ -177,9 +177,15 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Register
 		return nil, httpx.NewInternal("hash password", err)
 	}
 
+	// Self-service signup is restricted to buyer/seller. Allowing
+	// `role: "admin"` in the request body would let any attacker create
+	// an admin account in a single curl — CRITICAL OWASP API3 (Mass
+	// Assignment / privilege escalation). Admins must be promoted by
+	// another admin via a dedicated internal endpoint (not implemented
+	// yet — for now create admins manually in DB).
 	role := Role(in.Role)
-	if role != RoleSeller && role != RoleAdmin {
-		role = RoleViewer
+	if role != RoleSeller {
+		role = RoleBuyer
 	}
 
 	var phone, shopName *string
@@ -420,29 +426,70 @@ func (s *AuthService) LoginOrRegisterGoogle(ctx context.Context, info GoogleUser
 	return &LoginResult{User: user, TokenPair: pair}, nil
 }
 
-// StoreOAuthOTC - one-time code for deep-link exchange (matches Node.js behavior)
-func (s *AuthService) StoreOAuthOTC(ctx context.Context, accessToken, refreshToken string) (string, error) {
+// StoreOAuthOTC stores a one-time code for deep-link exchange. challenge
+// is the PKCE code_challenge that was bound to the OAuth state; pass ""
+// for legacy clients that opted out of PKCE.
+func (s *AuthService) StoreOAuthOTC(ctx context.Context, accessToken, refreshToken, challenge string) (string, error) {
 	code := randomHex(24)
-	payload := fmt.Sprintf(`{"access_token":"%s","refresh_token":"%s"}`, accessToken, refreshToken)
+	payload, err := jsonMarshalOTC(otcPayload{
+		Access:    accessToken,
+		Refresh:   refreshToken,
+		Challenge: challenge,
+	})
+	if err != nil {
+		return "", err
+	}
 	if err := s.rds.Set(ctx, "oauth:otc:"+code, payload, oauthOTCTTL).Err(); err != nil {
 		return "", err
 	}
 	return code, nil
 }
 
-func (s *AuthService) ExchangeOTC(ctx context.Context, code string) (accessToken, refreshToken string, err error) {
+// ExchangeOTC trades the one-time code for the JWT pair. When the OTC was
+// minted with a PKCE challenge, verifier must satisfy
+// BASE64URL(SHA256(verifier)) == challenge — otherwise an attacker who
+// hijacked the deep-link callback (e.g. via a competing app registered
+// for tropia://auth/callback) cannot spend the code.
+func (s *AuthService) ExchangeOTC(ctx context.Context, code, verifier string) (accessToken, refreshToken string, err error) {
 	key := "oauth:otc:" + code
-	val, err := s.rds.Get(ctx, key).Result()
+	val, err := s.rds.GetDel(ctx, key).Result() // single-use, atomic
 	if err != nil {
 		return "", "", httpx.NewAuth("invalid or expired code")
 	}
-	s.rds.Del(ctx, key) // single use
-	var data struct {
-		Access  string `json:"access_token"`
-		Refresh string `json:"refresh_token"`
-	}
+	var data otcPayload
 	if err := jsonUnmarshal(val, &data); err != nil {
 		return "", "", httpx.NewInternal("parse otc", err)
 	}
+	if data.Challenge != "" {
+		if !verifyPKCE(verifier, data.Challenge) {
+			return "", "", httpx.NewAuth("invalid code_verifier")
+		}
+	}
 	return data.Access, data.Refresh, nil
+}
+
+type otcPayload struct {
+	Access    string `json:"access_token"`
+	Refresh   string `json:"refresh_token"`
+	Challenge string `json:"challenge,omitempty"`
+}
+
+func jsonMarshalOTC(p otcPayload) (string, error) {
+	b, err := jsonMarshal(p)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// verifyPKCE returns true iff BASE64URL(SHA256(verifier)) == challenge.
+// Uses a constant-time comparison so timing differences don't reveal
+// partial-match information.
+func verifyPKCE(verifier, challenge string) bool {
+	if len(verifier) < 43 || len(verifier) > 128 {
+		return false
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	got := base64URLEncodeNoPad(sum[:])
+	return constantTimeStringEq(got, challenge)
 }

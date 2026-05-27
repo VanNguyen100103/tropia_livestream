@@ -53,7 +53,7 @@ services:
     restart: unless-stopped
     ports:
       - "1935:1935"   # RTMP
-      - "8080:8080"   # HTTP-FLV / HLS
+      - "8080:8080"   # HTTP-FLV / HLS (raw — viewers go through nginx on 8090)
       - "1985:1985"   # HTTP API + WHIP/WHEP
       - "8000:8000/udp"  # WebRTC media
       - "10080:10080/udp"  # SRT
@@ -65,6 +65,27 @@ services:
     depends_on:
       - postgres
       - redis
+
+  # Nginx reverse proxy in front of SRS's HLS port.
+  # SRS hardcodes `Connection: close` on every response, so every .ts
+  # and .m3u8 request from a browser opens a new TCP socket. On Windows
+  # that exhausts the ephemeral port pool (16k ports, TIME_WAIT ~2 min)
+  # after ~10 minutes of viewing — Chrome surfaces it as
+  # net::ERR_ADDRESS_IN_USE and hls.js dies.
+  #
+  # Nginx terminates the client connection with keep-alive and pools a
+  # small set of upstream sockets to SRS, so the buyer only opens a
+  # handful of TCPs to nginx instead of one per segment.
+  hls-proxy:
+    image: nginx:1.27-alpine
+    container_name: tropia-hls-proxy
+    restart: unless-stopped
+    ports:
+      - "8090:8090"   # HLS for viewers (backend now returns this in playback URLs)
+    volumes:
+      - ./nginx/hls-proxy.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - srs
 
 volumes:
   postgres_data:

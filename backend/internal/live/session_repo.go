@@ -10,6 +10,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// ErrNotFound signals that a session-scoped resource (product, pin
+// target, etc.) doesn't exist. Handlers translate this into 404 to
+// avoid leaking whether the id is just unknown vs. owned by someone
+// else (BOLA defense — same shape as the upload handler's owner check).
+var ErrNotFound = errors.New("live: not found")
+
 type Session struct {
 	ID              uuid.UUID  `json:"id"`
 	SellerID        uuid.UUID  `json:"seller_id"`
@@ -17,7 +23,7 @@ type Session struct {
 	Description     *string    `json:"description,omitempty"`
 	CoverImageURL   *string    `json:"cover_image_url,omitempty"`
 	Category        *string    `json:"category,omitempty"`
-	AgoraChannel    string     `json:"agora_channel"`           // SRS stream key
+	StreamKey    string     `json:"stream_key"`           // SRS stream key
 	Status          string     `json:"status"`
 	StartedAt       time.Time  `json:"started_at"`
 	EndedAt         *time.Time `json:"ended_at,omitempty"`
@@ -29,7 +35,20 @@ type Session struct {
 	FollowCount     int        `json:"follow_count"`
 	VodHlsURL       *string    `json:"vod_hls_url,omitempty"`
 	VodMp4URL       *string    `json:"vod_mp4_url,omitempty"`
+	AiBotEnabled    bool       `json:"ai_bot_enabled"`
+	// PinnedProductID is the live_session_products.id currently highlighted
+	// by the host ("đang giới thiệu"). nil = no pin. Cleared automatically
+	// via ON DELETE SET NULL if the underlying session_products row goes.
+	PinnedProductID *uuid.UUID `json:"pinned_product_id,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
+
+	// Joined from shops + profiles (LEFT JOIN — nullable until the seller
+	// has both a profile row and an active shop).
+	SellerName   *string    `json:"seller_name,omitempty"`
+	SellerAvatar *string    `json:"seller_avatar,omitempty"`
+	ShopID       *uuid.UUID `json:"shop_id,omitempty"`
+	ShopName     *string    `json:"shop_name,omitempty"`
+	ShopLogoURL  *string    `json:"shop_logo_url,omitempty"`
 }
 
 type SessionProduct struct {
@@ -57,16 +76,24 @@ func NewSessionRepository(pool *pgxpool.Pool) *SessionRepository {
 	return &SessionRepository{pool: pool}
 }
 
-func (r *SessionRepository) Create(ctx context.Context, sellerID uuid.UUID, title, description, coverURL, category, agoraChannel string) (*Session, error) {
+func (r *SessionRepository) Create(ctx context.Context, sellerID uuid.UUID, title, description, coverURL, category, streamKey string) (*Session, error) {
+	// Insert returns the bare session row (no JOIN). The caller typically
+	// has its own context for the seller/shop fields, and we re-fetch via
+	// GetByID elsewhere when those are needed.
 	const q = `
-		INSERT INTO live_sessions (seller_id, title, description, cover_image_url, category, agora_channel)
+		INSERT INTO live_sessions (seller_id, title, description, cover_image_url, category, stream_key)
 		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6)
-		RETURNING id, seller_id, title, description, cover_image_url, category, agora_channel, status,
+		RETURNING id, seller_id, title, description, cover_image_url, category, stream_key, status,
 		          started_at, ended_at, viewer_count, like_count, order_count, revenue,
-		          cart_add_count, follow_count, vod_hls_url, vod_mp4_url, created_at
+		          cart_add_count, follow_count, vod_hls_url, vod_mp4_url, ai_bot_enabled, pinned_product_id, created_at
 	`
 	var s Session
-	if err := scanSession(r.pool.QueryRow(ctx, q, sellerID, title, description, coverURL, category, agoraChannel), &s); err != nil {
+	if err := r.pool.QueryRow(ctx, q, sellerID, title, description, coverURL, category, streamKey).Scan(
+		&s.ID, &s.SellerID, &s.Title, &s.Description, &s.CoverImageURL, &s.Category,
+		&s.StreamKey, &s.Status, &s.StartedAt, &s.EndedAt,
+		&s.ViewerCount, &s.LikeCount, &s.OrderCount, &s.Revenue,
+		&s.CartAddCount, &s.FollowCount, &s.VodHlsURL, &s.VodMp4URL, &s.AiBotEnabled, &s.PinnedProductID, &s.CreatedAt,
+	); err != nil {
 		return nil, err
 	}
 	return &s, nil
@@ -74,10 +101,14 @@ func (r *SessionRepository) Create(ctx context.Context, sellerID uuid.UUID, titl
 
 func (r *SessionRepository) GetByID(ctx context.Context, id uuid.UUID) (*Session, error) {
 	const q = `
-		SELECT id, seller_id, title, description, cover_image_url, category, agora_channel, status,
-		       started_at, ended_at, viewer_count, like_count, order_count, revenue,
-		       cart_add_count, follow_count, vod_hls_url, vod_mp4_url, created_at
-		FROM live_sessions WHERE id = $1
+		SELECT ls.id, ls.seller_id, ls.title, ls.description, ls.cover_image_url, ls.category, ls.stream_key, ls.status,
+		       ls.started_at, ls.ended_at, ls.viewer_count, ls.like_count, ls.order_count, ls.revenue,
+		       ls.cart_add_count, ls.follow_count, ls.vod_hls_url, ls.vod_mp4_url, ls.ai_bot_enabled, ls.pinned_product_id, ls.created_at,
+		       p.name, p.avatar_url, s.id, s.name, s.logo_url
+		FROM live_sessions ls
+		LEFT JOIN profiles p ON p.id = ls.seller_id
+		LEFT JOIN shops s    ON s.seller_id = ls.seller_id
+		WHERE ls.id = $1
 	`
 	var s Session
 	if err := scanSession(r.pool.QueryRow(ctx, q, id), &s); err != nil {
@@ -91,10 +122,14 @@ func (r *SessionRepository) GetByID(ctx context.Context, id uuid.UUID) (*Session
 
 func (r *SessionRepository) GetByChannel(ctx context.Context, channel string) (*Session, error) {
 	const q = `
-		SELECT id, seller_id, title, description, cover_image_url, category, agora_channel, status,
-		       started_at, ended_at, viewer_count, like_count, order_count, revenue,
-		       cart_add_count, follow_count, vod_hls_url, vod_mp4_url, created_at
-		FROM live_sessions WHERE agora_channel = $1
+		SELECT ls.id, ls.seller_id, ls.title, ls.description, ls.cover_image_url, ls.category, ls.stream_key, ls.status,
+		       ls.started_at, ls.ended_at, ls.viewer_count, ls.like_count, ls.order_count, ls.revenue,
+		       ls.cart_add_count, ls.follow_count, ls.vod_hls_url, ls.vod_mp4_url, ls.ai_bot_enabled, ls.pinned_product_id, ls.created_at,
+		       p.name, p.avatar_url, s.id, s.name, s.logo_url
+		FROM live_sessions ls
+		LEFT JOIN profiles p ON p.id = ls.seller_id
+		LEFT JOIN shops s    ON s.seller_id = ls.seller_id
+		WHERE ls.stream_key = $1
 	`
 	var s Session
 	if err := scanSession(r.pool.QueryRow(ctx, q, channel), &s); err != nil {
@@ -107,13 +142,28 @@ func (r *SessionRepository) GetByChannel(ctx context.Context, channel string) (*
 }
 
 func (r *SessionRepository) ListActive(ctx context.Context, limit int) ([]Session, error) {
+	// Use the live row count from live_viewers for viewer_count instead of
+	// the cached column. The card list on the Live tab is the most visible
+	// place the counter shows, and the cached column drifts whenever a
+	// client disconnects without firing /leave — host seeing "1 đang xem"
+	// after viewers actually left was the symptom.
 	const q = `
-		SELECT id, seller_id, title, description, cover_image_url, category, agora_channel, status,
-		       started_at, ended_at, viewer_count, like_count, order_count, revenue,
-		       cart_add_count, follow_count, vod_hls_url, vod_mp4_url, created_at
-		FROM live_sessions
-		WHERE status = 'live'
-		ORDER BY started_at DESC
+		SELECT ls.id, ls.seller_id, ls.title, ls.description, ls.cover_image_url, ls.category, ls.stream_key, ls.status,
+		       ls.started_at, ls.ended_at,
+		       COALESCE(vc.cnt, 0) AS viewer_count,
+		       ls.like_count, ls.order_count, ls.revenue,
+		       ls.cart_add_count, ls.follow_count, ls.vod_hls_url, ls.vod_mp4_url, ls.ai_bot_enabled, ls.pinned_product_id, ls.created_at,
+		       p.name, p.avatar_url, s.id, s.name, s.logo_url
+		FROM live_sessions ls
+		LEFT JOIN profiles p ON p.id = ls.seller_id
+		LEFT JOIN shops s    ON s.seller_id = ls.seller_id
+		LEFT JOIN (
+		    SELECT session_id, COUNT(*) AS cnt
+		    FROM live_viewers
+		    GROUP BY session_id
+		) vc ON vc.session_id = ls.id
+		WHERE ls.status = 'live'
+		ORDER BY ls.started_at DESC
 		LIMIT $1
 	`
 	rows, err := r.pool.Query(ctx, q, limit)
@@ -133,17 +183,43 @@ func (r *SessionRepository) ListActive(ctx context.Context, limit int) ([]Sessio
 }
 
 func (r *SessionRepository) MarkLive(ctx context.Context, channel string) error {
-	_, err := r.pool.Exec(ctx, `UPDATE live_sessions SET status = 'live' WHERE agora_channel = $1`, channel)
+	// Promote any non-ended row back to live. Covers two flows:
+	//   1. First publish after startLive() — session was 'scheduled',
+	//      becomes 'live' as expected.
+	//   2. RTMP blip → SRS fires on_unpublish (we'd marked ended_at) →
+	//      RTMP reconnects → on_publish fires this — we need to flip the
+	//      row back so viewers don't get kicked. Only refusing 'ended'
+	//      sessions (host explicitly pressed "Kết thúc") would be too
+	//      strict; instead we trust the explicit End() call below to be
+	//      the only authoritative end.
+	// The ended-by-host case is protected by End() also nulling ended_at
+	// implicitly — once End() runs, EndByChannel won't be hit again until
+	// a brand-new session starts.
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_sessions
+		    SET status = 'live', ended_at = NULL
+		  WHERE stream_key = $1
+		    AND status != 'ended'`, channel)
 	return err
 }
 
 func (r *SessionRepository) End(ctx context.Context, id uuid.UUID) error {
+	// Authoritative end — called from the API handler when the host taps
+	// "Kết thúc Live". Sets status='ended' permanently; even a follow-up
+	// SRS on_publish webhook can't resurrect it (MarkLive's WHERE clause
+	// excludes ended rows).
 	_, err := r.pool.Exec(ctx, `UPDATE live_sessions SET status = 'ended', ended_at = NOW() WHERE id = $1`, id)
 	return err
 }
 
 func (r *SessionRepository) EndByChannel(ctx context.Context, channel string) error {
-	_, err := r.pool.Exec(ctx, `UPDATE live_sessions SET status = 'ended', ended_at = NOW() WHERE agora_channel = $1`, channel)
+	// SRS on_unpublish fires on ANY RTMP disconnect — intentional end,
+	// network blip, host app backgrounded, etc. We only stamp ended_at
+	// (so the host's "Tổng kết" screen has the duration) WITHOUT flipping
+	// status, because the apivideo reconnect might bring the stream back
+	// within a few seconds. Status only flips to 'ended' through the
+	// explicit End() call wired to the user-facing "Kết thúc Live" button.
+	_, err := r.pool.Exec(ctx, `UPDATE live_sessions SET ended_at = NOW() WHERE stream_key = $1 AND status != 'ended'`, channel)
 	return err
 }
 
@@ -202,6 +278,29 @@ func (r *SessionRepository) RemoveViewer(ctx context.Context, sessionID, userID 
 	return err
 }
 
+// CountViewers returns the live row count from live_viewers — used by
+// getStats so the host overlay shows the actual number of currently-
+// connected viewers, not the cached counter on live_sessions which can
+// drift (see comment in getStats).
+func (r *SessionRepository) CountViewers(ctx context.Context, sessionID uuid.UUID) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM live_viewers WHERE session_id = $1`,
+		sessionID).Scan(&n)
+	return n, err
+}
+
+// CountFollows returns the number of distinct viewers who tapped the
+// follow pill during this session. Read off live_session_follows so the
+// stat survives a cached-counter drift the same way CountViewers does.
+func (r *SessionRepository) CountFollows(ctx context.Context, sessionID uuid.UUID) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM live_session_follows WHERE session_id = $1`,
+		sessionID).Scan(&n)
+	return n, err
+}
+
 func (r *SessionRepository) IncrementLikes(ctx context.Context, sessionID uuid.UUID) error {
 	_, err := r.pool.Exec(ctx, `SELECT increment_likes($1)`, sessionID)
 	return err
@@ -212,8 +311,25 @@ func (r *SessionRepository) IncrementCartAdd(ctx context.Context, sessionID uuid
 	return err
 }
 
-func (r *SessionRepository) IncrementFollow(ctx context.Context, sessionID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `SELECT increment_follow_count($1)`, sessionID)
+// UpsertFollow records that `userID` tapped the "+ Theo dõi" pill during
+// `sessionID`. The composite PK + ON CONFLICT DO NOTHING dedupe — the
+// counter trigger only fires on a genuine new row, so a buyer who toggles
+// follow on/off 7 times in one stream is still counted as one follow.
+// Replaces the old IncrementFollow that blindly incremented the column.
+func (r *SessionRepository) UpsertFollow(ctx context.Context, sessionID, userID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO live_session_follows (session_id, user_id) VALUES ($1, $2)
+		 ON CONFLICT DO NOTHING`,
+		sessionID, userID)
+	return err
+}
+
+// SetBotEnabled toggles the DeepSeek auto-reply bot for a session. Returns
+// the new value so the handler can reply with it.
+func (r *SessionRepository) SetBotEnabled(ctx context.Context, sessionID uuid.UUID, enabled bool) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE live_sessions SET ai_bot_enabled = $2 WHERE id = $1`,
+		sessionID, enabled)
 	return err
 }
 
@@ -229,17 +345,100 @@ func (r *SessionRepository) AddProducts(ctx context.Context, sessionID uuid.UUID
 	}
 	defer tx.Rollback(ctx)
 	for i, it := range items {
+		var imgURL string
+		if it.ImageURL != nil {
+			imgURL = *it.ImageURL
+		}
+		var category string
+		if it.Category != nil {
+			category = *it.Category
+		}
 		_, err := tx.Exec(ctx, `
 			INSERT INTO live_session_products (session_id, product_id, product_name, image_url,
 			  original_price, sale_price, discount_pct, stock_left, sold_count, unit, category, sort_order, is_pinned)
 			VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, 0, COALESCE(NULLIF($9, ''), 'cái'), NULLIF($10, ''), $11, $12)`,
-			sessionID, it.ProductID, it.ProductName, "",
-			it.OriginalPrice, it.SalePrice, it.DiscountPct, it.StockLeft, it.Unit, "", i, it.IsPinned)
+			sessionID, it.ProductID, it.ProductName, imgURL,
+			it.OriginalPrice, it.SalePrice, it.DiscountPct, it.StockLeft, it.Unit, category, i, it.IsPinned)
 		if err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// ReplaceProducts swaps the entire pinned list for the session in one
+// transaction. Used when the host returns from the picker — we wipe the
+// existing rows and re-insert from `items`, so deletes + additions land
+// atomically.
+func (r *SessionRepository) ReplaceProducts(ctx context.Context, sessionID uuid.UUID, items []SessionProduct) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM live_session_products WHERE session_id = $1`, sessionID); err != nil {
+		return err
+	}
+	for i, it := range items {
+		var imgURL string
+		if it.ImageURL != nil {
+			imgURL = *it.ImageURL
+		}
+		var category string
+		if it.Category != nil {
+			category = *it.Category
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO live_session_products (session_id, product_id, product_name, image_url,
+			  original_price, sale_price, discount_pct, stock_left, sold_count, unit, category, sort_order, is_pinned)
+			VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, 0, COALESCE(NULLIF($9, ''), 'cái'), NULLIF($10, ''), $11, $12)`,
+			sessionID, it.ProductID, it.ProductName, imgURL,
+			it.OriginalPrice, it.SalePrice, it.DiscountPct, it.StockLeft, it.Unit, category, i, it.IsPinned); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// RemoveProduct unpins one live_session_products row by its own id.
+// productID here is live_session_products.id, NOT the catalog product
+// uuid — that distinction matters because the host UI references the
+// session-scoped record.
+func (r *SessionRepository) RemoveProduct(ctx context.Context, sessionID, productID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM live_session_products WHERE session_id = $1 AND id = $2`,
+		sessionID, productID)
+	return err
+}
+
+// SetPinnedProduct highlights one session product as "đang giới thiệu"
+// (Shopee Live "GẶP LÊN"). Pass nil productID to clear the pin.
+// Returns ErrNotFound if the product doesn't belong to this session
+// — that prevents a malicious host from pinning another session's
+// product via id guessing.
+func (r *SessionRepository) SetPinnedProduct(ctx context.Context, sessionID uuid.UUID, productID *uuid.UUID) error {
+	if productID == nil {
+		_, err := r.pool.Exec(ctx,
+			`UPDATE live_sessions SET pinned_product_id = NULL WHERE id = $1`,
+			sessionID)
+		return err
+	}
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE live_sessions
+		SET pinned_product_id = $2
+		WHERE id = $1
+		  AND EXISTS (
+		      SELECT 1 FROM live_session_products
+		      WHERE id = $2 AND session_id = $1
+		  )`,
+		sessionID, *productID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *SessionRepository) ListProducts(ctx context.Context, sessionID uuid.UUID) ([]SessionProduct, error) {
@@ -268,6 +467,40 @@ func (r *SessionRepository) ListProducts(ctx context.Context, sessionID uuid.UUI
 	return out, rows.Err()
 }
 
+// ListProductsForSessions batch-fetches pinned products for many
+// sessions in one query. Used by listActive to kill the N+1 pattern —
+// 50 sessions used to fire 51 queries (1 list + 50 products), this
+// brings it to 2. Returns a map keyed by session_id so callers can
+// stitch back without scanning the slice every iteration.
+func (r *SessionRepository) ListProductsForSessions(ctx context.Context, sessionIDs []uuid.UUID) (map[uuid.UUID][]SessionProduct, error) {
+	if len(sessionIDs) == 0 {
+		return map[uuid.UUID][]SessionProduct{}, nil
+	}
+	const q = `
+		SELECT id, session_id, product_id, product_name, image_url,
+		       original_price, sale_price, discount_pct, stock_left, sold_count, unit, category, sort_order, is_pinned
+		FROM live_session_products
+		WHERE session_id = ANY($1)
+		ORDER BY session_id, sort_order
+	`
+	rows, err := r.pool.Query(ctx, q, sessionIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[uuid.UUID][]SessionProduct, len(sessionIDs))
+	for rows.Next() {
+		var p SessionProduct
+		if err := rows.Scan(&p.ID, &p.SessionID, &p.ProductID, &p.ProductName, &p.ImageURL,
+			&p.OriginalPrice, &p.SalePrice, &p.DiscountPct, &p.StockLeft, &p.SoldCount,
+			&p.Unit, &p.Category, &p.SortOrder, &p.IsPinned); err != nil {
+			return nil, err
+		}
+		out[p.SessionID] = append(out[p.SessionID], p)
+	}
+	return out, rows.Err()
+}
+
 func (r *SessionRepository) GetSessionProduct(ctx context.Context, id uuid.UUID) (*SessionProduct, error) {
 	const q = `
 		SELECT id, session_id, product_id, product_name, image_url,
@@ -287,6 +520,21 @@ func (r *SessionRepository) GetSessionProduct(ctx context.Context, id uuid.UUID)
 		return nil, err
 	}
 	return &p, nil
+}
+
+// ---------- Profile lookup (small helper used by chat) ----------
+
+// LookupProfile fetches the display name + avatar for the user posting a
+// chat message. We do this inline (rather than going through auth.Repository)
+// because the chat handler only needs these two fields — full Profile is
+// overkill. Returns ("Khách", "") on lookup failure so the chat never
+// blocks on a stale profile row.
+func (r *SessionRepository) LookupProfile(ctx context.Context, userID uuid.UUID) (name string, avatar string) {
+	const q = `SELECT name, COALESCE(avatar_url, '') FROM profiles WHERE id = $1`
+	if err := r.pool.QueryRow(ctx, q, userID).Scan(&name, &avatar); err != nil {
+		return "Khách", ""
+	}
+	return name, avatar
 }
 
 // ---------- Chat ----------
@@ -352,15 +600,50 @@ func (r *SessionRepository) RecentChats(ctx context.Context, sessionID uuid.UUID
 	return out, rows.Err()
 }
 
+// TimelineChats fetches every chat message for a session in chronological
+// order, bounded by `limit` (caller picks; 10k is sane for replay). Differs
+// from RecentChats which is DESC-then-reverse with a small cap for the
+// live chat window — replay needs the full ordered stream.
+func (r *SessionRepository) TimelineChats(ctx context.Context, sessionID uuid.UUID, limit int) ([]ChatMessage, error) {
+	if limit < 1 {
+		limit = 10000
+	}
+	const q = `
+		SELECT id, session_id, user_id, username, avatar_url, message, is_host, type, created_at
+		FROM chat_messages WHERE session_id = $1
+		ORDER BY created_at ASC LIMIT $2
+	`
+	rows, err := r.pool.Query(ctx, q, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ChatMessage, 0)
+	for rows.Next() {
+		var m ChatMessage
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.UserID, &m.Username, &m.AvatarURL,
+			&m.Message, &m.IsHost, &m.Type, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // ---------- helpers ----------
 
 type sessRowScanner interface{ Scan(...any) error }
 
 func scanSession(row sessRowScanner, s *Session) error {
+	// All callers of scanSession use the LEFT JOIN query with 5 extra
+	// columns (profile.name, profile.avatar_url, shop.id, shop.name,
+	// shop.logo_url). Create() uses its own scan inline since it doesn't
+	// JOIN.
 	return row.Scan(
 		&s.ID, &s.SellerID, &s.Title, &s.Description, &s.CoverImageURL, &s.Category,
-		&s.AgoraChannel, &s.Status, &s.StartedAt, &s.EndedAt,
+		&s.StreamKey, &s.Status, &s.StartedAt, &s.EndedAt,
 		&s.ViewerCount, &s.LikeCount, &s.OrderCount, &s.Revenue,
-		&s.CartAddCount, &s.FollowCount, &s.VodHlsURL, &s.VodMp4URL, &s.CreatedAt,
+		&s.CartAddCount, &s.FollowCount, &s.VodHlsURL, &s.VodMp4URL, &s.AiBotEnabled, &s.PinnedProductID, &s.CreatedAt,
+		&s.SellerName, &s.SellerAvatar, &s.ShopID, &s.ShopName, &s.ShopLogoURL,
 	)
 }

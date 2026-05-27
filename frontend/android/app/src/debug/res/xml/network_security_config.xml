@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only overlay: allows cleartext for `make dev-mobile` (LAN IP),
+  Android emulator (10.0.2.2), and localhost. Only loaded when building
+  the debug variant — release APKs use main/res/xml/network_security_config.xml
+  which rejects cleartext entirely.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

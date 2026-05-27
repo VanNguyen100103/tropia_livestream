@@ -74,6 +74,68 @@ class LiveRepository {
     await _dio.post('/api/live/streams/$sessionId/end');
   }
 
+  /// Host-only: toggle DeepSeek auto-reply bot for this session.
+  Future<bool> setBotEnabled(String sessionId, bool enabled) async {
+    final res = await _dio.patch('/api/live/streams/$sessionId/bot',
+        data: {'enabled': enabled});
+    final data = res.data as Map<String, dynamic>;
+    return (data['ai_bot_enabled'] as bool?) ?? enabled;
+  }
+
+  /// Host-only: attach (pin) products to the session so viewers see them.
+  /// [items] elements use snake_case keys matching the Go backend:
+  ///   product_id (uuid string, optional), product_name, image_url,
+  ///   original_price, sale_price, discount_pct, stock_left, unit, is_pinned.
+  Future<List<Map<String, dynamic>>> addSessionProducts(
+    String sessionId,
+    List<Map<String, dynamic>> items,
+  ) async {
+    final res = await _dio.post('/api/live/streams/$sessionId/products',
+        data: {'products': items});
+    final data = res.data as Map<String, dynamic>;
+    final list = (data['products'] as List?) ?? const [];
+    return list.cast<Map<String, dynamic>>();
+  }
+
+  /// Replace the entire pinned product list for a live session in one
+  /// call. Use when the host returns from the picker mid-stream so the
+  /// server-side rows match exactly what the host last confirmed —
+  /// keeps the bot reply heuristic and viewer-facing carousel in sync.
+  Future<List<Map<String, dynamic>>> replaceSessionProducts(
+    String sessionId,
+    List<Map<String, dynamic>> items,
+  ) async {
+    final res = await _dio.put('/api/live/streams/$sessionId/products',
+        data: {'products': items});
+    final data = res.data as Map<String, dynamic>;
+    final list = (data['products'] as List?) ?? const [];
+    return list.cast<Map<String, dynamic>>();
+  }
+
+  /// Unpin a single product from a live session. [sessionProductId] is
+  /// the `live_session_products.id` (the session-scoped row), not the
+  /// catalog product uuid.
+  Future<void> removeSessionProduct(String sessionId, String sessionProductId) async {
+    await _dio.delete('/api/live/streams/$sessionId/products/$sessionProductId');
+  }
+
+  /// Shopee Live "GẶP LÊN" — highlight one session product as the one
+  /// currently being demoed. Pass null to clear the highlight.
+  /// [sessionProductId] is `live_session_products.id` (session-scoped).
+  Future<void> setPinnedProduct(String sessionId, String? sessionProductId) async {
+    await _dio.post(
+      '/api/live/streams/$sessionId/pin',
+      data: {'product_id': sessionProductId},
+    );
+  }
+
+  /// Re-broadcast an already-created coupon to every viewer's floating
+  /// banner. Creating a new coupon already auto-announces; this is for
+  /// the "Phát lại" button in the host coupon manager.
+  Future<void> announceCoupon(String sessionId, String couponId) async {
+    await _dio.post('/api/live/streams/$sessionId/coupons/$couponId/announce');
+  }
+
   /// Fetches playback URLs for a viewer.
   Future<Map<String, dynamic>> fetchPlayback(String sessionId) async {
     final res = await _dio.get('/api/live/streams/$sessionId/playback');
@@ -246,17 +308,80 @@ class LiveRepository {
     }
   }
 
-  // ── Coupons (still not wired on the Go backend) ────────────────────────────
+  // ── Coupons (live session-scoped) ──────────────────────────────────────────
 
+  /// Public list of coupons created for this live session. Used by the
+  /// viewer entry banner ("Lưu") and the live cart voucher picker.
   Future<List<Map<String, dynamic>>> fetchLiveCoupons(String sessionId) async {
-    AppLogger.logInfo(_tag, 'fetchLiveCoupons: endpoint not wired on backend yet');
-    return const [];
+    try {
+      final res = await _dio.get('/api/live/streams/$sessionId/coupons');
+      final list = (res.data as Map<String, dynamic>)['coupons'] as List?;
+      return list?.cast<Map<String, dynamic>>() ?? const [];
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchLiveCoupons failed', e, null);
+      return const [];
+    }
+  }
+
+  /// Host-only: persist a coupon onto a live session so viewers can claim it.
+  /// [discountType] = 'percent' | 'fixed'.
+  Future<Map<String, dynamic>?> createLiveCoupon({
+    required String sessionId,
+    required String code,
+    required String discountType,
+    required double discountValue,
+    double minOrderValue = 0,
+    int? maxUses,
+    required DateTime expiresAt,
+  }) async {
+    try {
+      final res = await _dio.post(
+        '/api/live/streams/$sessionId/coupons',
+        data: {
+          'code':           code,
+          'discount_type':  discountType,
+          'discount_value': discountValue,
+          'min_order_value': minOrderValue,
+          if (maxUses != null) 'max_uses': maxUses,
+          'expires_at':     expiresAt.toUtc().toIso8601String(),
+        },
+      );
+      final body = res.data as Map<String, dynamic>;
+      return body['coupon'] as Map<String, dynamic>?;
+    } on DioException catch (e) {
+      AppLogger.logError(_tag, 'createLiveCoupon failed ${e.response?.statusCode}: ${e.response?.data}', e, null);
+      rethrow;
+    }
   }
 
   Future<void> broadcastCoupon({
     required String sessionId,
     required String couponCode,
   }) async {
-    AppLogger.logInfo(_tag, 'broadcastCoupon: endpoint not wired on backend yet');
+    // Broadcast = chat message with a prefix the viewer side detects to
+    // open a popup. Cheap, no extra endpoint.
+    await sendChat(
+      sessionId: sessionId,
+      message:   '🎫 Coupon: $couponCode',
+      isHost:    true,
+    );
+  }
+
+  // ── VOD replay timeline ────────────────────────────────────────────────────
+
+  /// Fetches the merged replay timeline for a recorded session: every
+  /// host action (bot toggle / pin / coupon) plus chat, each entry
+  /// tagged with `t` = ms offset from the start of the MP4. The VOD
+  /// player drives overlays off this list synced to videoController
+  /// position. Returns null on failure (player still plays the bare
+  /// MP4, just without overlays).
+  Future<Map<String, dynamic>?> fetchVodTimeline(String sessionId) async {
+    try {
+      final res = await _dio.get('/api/live/streams/$sessionId/timeline');
+      return res.data as Map<String, dynamic>;
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchVodTimeline failed', e, null);
+      return null;
+    }
   }
 }

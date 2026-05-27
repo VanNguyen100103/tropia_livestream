@@ -27,7 +27,6 @@ import (
 	"log"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -45,6 +44,7 @@ import (
 	"github.com/tropia/backend/internal/live"
 	"github.com/tropia/backend/internal/notify"
 	"github.com/tropia/backend/internal/storage"
+	"github.com/tropia/backend/internal/vod"
 )
 
 const consumerName = "worker-1"
@@ -84,6 +84,7 @@ func main() {
 	logger.Info("postgres connected")
 
 	sessRepo := live.NewSessionRepository(db)
+	eventsRepo := live.NewEventRepository(db)
 
 	// R2 (optional — if creds not set, recording handler will skip uploads).
 	var r2 *storage.R2
@@ -122,7 +123,7 @@ func main() {
 		{topic: "order.created", group: "notify-order-created", handler: handleOrderCreated(emailer, logger)},
 		{topic: "payment.success", group: "notify-payment-success", handler: handlePaymentSuccess(emailer, logger)},
 		{topic: "order.cancelled", group: "notify-order-cancelled", handler: handleOrderCancelled(emailer, logger)},
-		{topic: "recording.created", group: "vod-uploader", handler: handleRecording(r2, sessRepo, dvrRoot, logger)},
+		{topic: "recording.created", group: "vod-uploader", handler: handleRecording(r2, sessRepo, eventsRepo, dvrRoot, logger)},
 	}
 
 	var wg sync.WaitGroup
@@ -135,6 +136,19 @@ func main() {
 			bus.Subscribe(ctx, s.topic, s.group, consumerName, s.handler)
 		}()
 	}
+
+	// Periodic DVR sweep — removes orphaned .flv files left by failed
+	// remuxes, crashed workers, or sessions cut mid-stream. Successful
+	// uploads already delete their FLV; this is the safety net so the
+	// host disk doesn't fill up over weeks of operation. 2h is long
+	// enough that a slow ffmpeg can finish (typical: seconds; worst
+	// case: minutes for a multi-hour stream), short enough that orphans
+	// don't pile up.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runDVRSweeper(ctx, dvrRoot, 30*time.Minute, 2*time.Hour, logger)
+	}()
 
 	logger.Info("worker running", "subscriptions", len(subs))
 
@@ -188,25 +202,43 @@ type passwordResetEvent struct {
 	ResetToken string `json:"reset_token"`
 }
 
+type orderLineItem struct {
+	Name     string `json:"name"`
+	Quantity int    `json:"quantity"`
+	Price    int    `json:"price"`
+}
+
 type orderEvent struct {
-	OrderID        string `json:"order_id"`
-	BuyerID        string `json:"buyer_id"`
-	BuyerName      string `json:"buyer_name"`
-	ProductName    string `json:"product_name"`
-	Quantity       int    `json:"quantity"`
-	TotalPrice     int    `json:"total_price"`
-	DiscountAmount int    `json:"discount_amount"`
-	SessionTitle   string `json:"session_title,omitempty"`
+	OrderID        string          `json:"order_id"`
+	BuyerID        string          `json:"buyer_id"`
+	BuyerName       string          `json:"buyer_name"`
+	Email           string          `json:"email"`
+	Name            string          `json:"name"`
+	ProductName     string          `json:"product_name"`
+	Quantity        int             `json:"quantity"`
+	TotalPrice      int             `json:"total_price"`
+	DiscountAmount  int             `json:"discount_amount"`
+	PaymentMethod   string          `json:"payment_method"`
+	Items           []orderLineItem `json:"items"`
+	SessionTitle    string          `json:"session_title,omitempty"`
+	ShippingName    string          `json:"shipping_name,omitempty"`
+	ShippingPhone   string          `json:"shipping_phone,omitempty"`
+	ShippingAddress string          `json:"shipping_address,omitempty"`
 }
 
 type paymentSuccessEvent struct {
-	OrderID  string `json:"order_id"`
-	BuyerID  string `json:"buyer_id"`
-	Method   string `json:"method"`
-	TransID  string `json:"trans_id"`
-	Amount   int    `json:"amount"`
-	Email    string `json:"email"`
-	Name     string `json:"name"`
+	OrderID         string          `json:"order_id"`
+	BuyerID         string          `json:"buyer_id"`
+	Method          string          `json:"method"`
+	TransID         string          `json:"trans_id"`
+	Amount          int             `json:"amount"`
+	DiscountAmount  int             `json:"discount_amount"`
+	Email           string          `json:"email"`
+	Name            string          `json:"name"`
+	Items           []orderLineItem `json:"items"`
+	ShippingName    string          `json:"shipping_name,omitempty"`
+	ShippingPhone   string          `json:"shipping_phone,omitempty"`
+	ShippingAddress string          `json:"shipping_address,omitempty"`
 }
 
 type orderCancelledEvent struct {
@@ -268,19 +300,74 @@ func handlePasswordReset(emailer *notify.Email, log *slog.Logger, clientURL stri
 	}
 }
 
+// methodLabel returns a Vietnamese display label for the payment method
+// recorded on the order. The raw values come from FE (`cod`) or the
+// payment gateway (`MoMo`, `VNPay`, `ZaloPay`).
+func methodLabel(method string) string {
+	switch strings.ToLower(method) {
+	case "cod":
+		return "Tiền mặt khi nhận hàng (COD)"
+	case "momo":
+		return "Ví MoMo"
+	case "zalopay":
+		return "ZaloPay"
+	case "vnpay":
+		return "VNPay"
+	default:
+		return method
+	}
+}
+
+func toPaymentItems(in []orderLineItem) []notify.PaymentItem {
+	out := make([]notify.PaymentItem, len(in))
+	for i, it := range in {
+		out[i] = notify.PaymentItem{Name: it.Name, Quantity: it.Quantity, Price: it.Price}
+	}
+	return out
+}
+
 func handleOrderCreated(emailer *notify.Email, log *slog.Logger) events.HandlerFunc {
 	return func(ctx context.Context, data []byte) error {
 		ev, err := decode[orderEvent](data)
 		if err != nil {
 			return err
 		}
-		// We don't have buyer email in payload yet — production would look up.
-		// For now log and skip email if email is missing.
-		if ev.BuyerName == "" {
-			log.Info("order created (no email lookup wired)", "order_id", ev.OrderID)
+		if ev.Email == "" {
+			log.Info("order created (no email)", "order_id", ev.OrderID)
 			return nil
 		}
-		log.Info("order created", "order_id", ev.OrderID, "buyer", ev.BuyerName, "total", ev.TotalPrice)
+		// For COD the order is committed at creation → this is also the
+		// receipt the buyer expects. We re-use TmplPaymentSuccess (rich
+		// itemized layout) with the COD label. For online methods we
+		// SKIP here and let payment.success drive the receipt once the
+		// gateway confirms — otherwise the buyer would get a misleading
+		// "thanh toán thành công" email before they've actually paid.
+		if strings.ToLower(ev.PaymentMethod) != "cod" {
+			log.Info("order created (online — receipt deferred to payment.success)",
+				"order_id", ev.OrderID, "method", ev.PaymentMethod)
+			return nil
+		}
+		name := ev.Name
+		if name == "" {
+			name = ev.BuyerName
+		}
+		subject, body := notify.TmplPaymentSuccess(notify.PaymentSuccessInput{
+			Name:            name,
+			OrderID:         ev.OrderID,
+			Method:          methodLabel(ev.PaymentMethod),
+			TransactionID:   "—",
+			TotalPrice:      ev.TotalPrice,
+			DiscountAmount:  ev.DiscountAmount,
+			Items:           toPaymentItems(ev.Items),
+			ShippingName:    ev.ShippingName,
+			ShippingPhone:   ev.ShippingPhone,
+			ShippingAddress: ev.ShippingAddress,
+		})
+		if err := emailer.Send(ev.Email, subject, body); err != nil {
+			log.Warn("order email failed", "to", ev.Email, "err", err)
+			return err
+		}
+		log.Info("order email sent", "to", ev.Email, "order_id", ev.OrderID, "total", ev.TotalPrice)
 		return nil
 	}
 }
@@ -296,19 +383,22 @@ func handlePaymentSuccess(emailer *notify.Email, log *slog.Logger) events.Handle
 			return nil
 		}
 		subject, body := notify.TmplPaymentSuccess(notify.PaymentSuccessInput{
-			Name:          ev.Name,
-			OrderID:       ev.OrderID,
-			Method:        ev.Method,
-			TransactionID: ev.TransID,
-			TotalPrice:    ev.Amount,
-			// Items/DiscountAmount left empty for now — fill when payment
-			// event publisher includes line items (TODO in commerce.OrderService).
+			Name:            ev.Name,
+			OrderID:         ev.OrderID,
+			Method:          methodLabel(ev.Method),
+			TransactionID:   ev.TransID,
+			TotalPrice:      ev.Amount,
+			DiscountAmount:  ev.DiscountAmount,
+			Items:           toPaymentItems(ev.Items),
+			ShippingName:    ev.ShippingName,
+			ShippingPhone:   ev.ShippingPhone,
+			ShippingAddress: ev.ShippingAddress,
 		})
 		if err := emailer.Send(ev.Email, subject, body); err != nil {
 			log.Warn("payment email failed", "to", ev.Email, "err", err)
 			return err
 		}
-		log.Info("payment success sent", "to", ev.Email, "order_id", ev.OrderID)
+		log.Info("payment success sent", "to", ev.Email, "order_id", ev.OrderID, "total", ev.Amount)
 		return nil
 	}
 }
@@ -343,7 +433,19 @@ type recordingEvent struct {
 //     Default: "../infra/dvr" (relative to backend/ working dir).
 //   - `ffmpeg` on PATH.
 //   - R2 credentials configured (otherwise the upload is skipped with a warning).
-func handleRecording(r2 *storage.R2, repo *live.SessionRepository, dvrRoot string, log *slog.Logger) events.HandlerFunc {
+// handleRecording is fired when SRS finishes writing a DVR .flv file.
+// Pipeline:
+//   1. Look up the session + its chat + host action events from DB.
+//   2. Run the bake pipeline (vod.Bake): re-encode FLV → MP4 with
+//      chat subtitles burned in via libass. Phase 2 will also overlay
+//      pin/coupon/bot PNGs.
+//   3. Upload final MP4 to R2 at videos/vod/<sessionId>/<ts>.mp4 and
+//      set live_sessions.vod_mp4_url.
+//
+// This is the SLOW path — full re-encode at ~1× realtime on a laptop
+// CPU. The previous `-c copy` remux is gone because we can't bake
+// overlays without re-encoding video frames.
+func handleRecording(r2 *storage.R2, repo *live.SessionRepository, eventsRepo *live.EventRepository, dvrRoot string, log *slog.Logger) events.HandlerFunc {
 	return func(ctx context.Context, data []byte) error {
 		ev, err := decode[recordingEvent](data)
 		if err != nil {
@@ -369,58 +471,142 @@ func handleRecording(r2 *storage.R2, repo *live.SessionRepository, dvrRoot strin
 			return nil // don't retry — file isn't going to appear
 		}
 
-		// 1. Remux FLV → MP4 (no re-encode). Output beside the input.
-		mp4Path := strings.TrimSuffix(flvPath, filepath.Ext(flvPath)) + ".mp4"
-		cmd := exec.CommandContext(ctx, "ffmpeg",
-			"-y",                  // overwrite
-			"-i", flvPath,         // input
-			"-c", "copy",          // no re-encode (fast)
-			"-movflags", "+faststart", // MOOV atom at the front (web-friendly)
-			mp4Path,
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			msg := fmt.Sprintf("ffmpeg failed: %v — %s", err, truncate(string(out), 400))
-			log.Warn("remux failed", "session", ev.SessionID, "err", msg)
-			_ = repo.MarkRecordingFailed(ctx, recID, msg)
-			return err // worker will retry on next read of the pending entry
+		// 1. Load session + timeline (chat + events).
+		sess, err := repo.GetByID(ctx, sessUUID)
+		if err != nil {
+			_ = repo.MarkRecordingFailed(ctx, recID, "get session: "+err.Error())
+			return err
+		}
+		chats, _ := repo.TimelineChats(ctx, sessUUID, 10000)
+		evts, _ := eventsRepo.ListBySession(ctx, sessUUID)
+		products, _ := repo.ListProducts(ctx, sessUUID)
+
+		// Video duration — prefer session.ended_at - started_at since
+		// that's set by the explicit /end call. Fall back to event
+		// duration_sec if ended_at is missing (worker fired before
+		// MarkEnded landed).
+		var videoDur time.Duration
+		if sess.EndedAt != nil {
+			videoDur = sess.EndedAt.Sub(sess.StartedAt)
+		} else if ev.DurationSec > 0 {
+			videoDur = time.Duration(ev.DurationSec) * time.Second
 		}
 
-		// 2. Upload MP4 to R2.
+		// 2. Bake (re-encode + subtitles + overlays burned in).
+		workDir := filepath.Join(os.TempDir(), "tropia-bake-"+sessUUID.String())
+		bakedPath, bakeErr := vod.Bake(ctx, vod.BakeInput{
+			SessionID:     sessUUID,
+			FLVPath:       flvPath,
+			SessionStart:  sess.StartedAt,
+			Chats:         chats,
+			Events:        evts,
+			Products:      products,
+			VideoDuration: videoDur,
+			WorkDir:       workDir,
+			Logger:        log,
+		})
+		if bakeErr != nil {
+			_ = repo.MarkRecordingFailed(ctx, recID, bakeErr.Error())
+			_ = os.RemoveAll(workDir)
+			return bakeErr
+		}
+
+		// 3. Upload baked MP4 to R2.
 		if r2 == nil {
 			msg := "R2 not configured — skipping upload"
-			log.Warn(msg, "session", ev.SessionID, "local_mp4", mp4Path)
+			log.Warn(msg, "session", ev.SessionID, "local_mp4", bakedPath)
 			_ = repo.MarkRecordingFailed(ctx, recID, msg)
+			_ = os.RemoveAll(workDir)
 			return nil
 		}
-		mp4Bytes, err := os.ReadFile(mp4Path)
+		mp4Bytes, err := os.ReadFile(bakedPath)
 		if err != nil {
 			_ = repo.MarkRecordingFailed(ctx, recID, err.Error())
+			_ = os.RemoveAll(workDir)
 			return err
 		}
 		r2Key := fmt.Sprintf("videos/vod/%s/%d.mp4", ev.SessionID, time.Now().Unix())
 		url, err := r2.Upload(ctx, r2Key, "video/mp4", mp4Bytes)
 		if err != nil {
 			_ = repo.MarkRecordingFailed(ctx, recID, err.Error())
+			_ = os.RemoveAll(workDir)
 			return err
 		}
 
-		// 3. Persist URL + cleanup.
+		// 4. Persist URL + cleanup.
 		if err := repo.SetVodURLs(ctx, sessUUID, url, ""); err != nil {
 			log.Warn("update vod_url failed", "err", err)
 		}
 		_ = repo.MarkRecordingUploaded(ctx, recID, r2Key, int64(len(mp4Bytes)))
 
-		// Best-effort cleanup of local files (FLV + MP4); keep on error so
-		// you can re-process by hand.
+		// Best-effort cleanup. Keep FLV on error so you can re-process
+		// by hand; if we got this far the FLV has done its job.
 		_ = os.Remove(flvPath)
-		_ = os.Remove(mp4Path)
+		_ = os.RemoveAll(workDir)
 
-		log.Info("recording uploaded",
+		log.Info("recording baked + uploaded",
 			"session", ev.SessionID,
 			"size_mb", len(mp4Bytes)/(1024*1024),
+			"chats", len(chats),
+			"events", len(evts),
 			"url", url,
 		)
 		return nil
+	}
+}
+
+// ── DVR cleanup sweeper ─────────────────────────────────────────────────────
+
+// runDVRSweeper walks dvrRoot every `interval` and removes any .flv file
+// whose mtime is older than `maxAge`. Recurses one level so it handles
+// the SRS layout `<dvrRoot>/<app>/<stream>.<ts>.flv`. Errors are logged
+// but never fatal — a missing dir on first launch is fine.
+func runDVRSweeper(ctx context.Context, dvrRoot string, interval, maxAge time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	// Initial sweep on startup so a crashed worker that left orphans
+	// behind doesn't have to wait for the first tick.
+	sweepDVR(dvrRoot, maxAge, log)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweepDVR(dvrRoot, maxAge, log)
+		}
+	}
+}
+
+func sweepDVR(dvrRoot string, maxAge time.Duration, log *slog.Logger) {
+	cutoff := time.Now().Add(-maxAge)
+	var removed, scanned int
+	err := filepath.Walk(dvrRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".flv" {
+			return nil
+		}
+		scanned++
+		if info.ModTime().After(cutoff) {
+			return nil
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			log.Warn("dvr sweep: remove failed", "path", path, "err", rmErr)
+			return nil
+		}
+		removed++
+		return nil
+	})
+	if err != nil {
+		log.Warn("dvr sweep: walk failed", "root", dvrRoot, "err", err)
+		return
+	}
+	if removed > 0 {
+		log.Info("dvr sweep", "root", dvrRoot, "scanned", scanned, "removed", removed, "older_than", maxAge)
 	}
 }
 

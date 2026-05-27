@@ -272,6 +272,41 @@ func TmplPaymentSuccess(in PaymentSuccessInput) (string, string) {
 		    </tr>`, brandMuted, brandPrimary, formatVND(in.DiscountAmount))
 	}
 
+	// Shipping address block — rendered only when at least one of
+	// name/phone/address is provided. The pickup-at-store flow leaves
+	// all three blank and the section is omitted entirely.
+	shippingSection := ""
+	if in.ShippingName != "" || in.ShippingPhone != "" || in.ShippingAddress != "" {
+		recipient := ""
+		switch {
+		case in.ShippingName != "" && in.ShippingPhone != "":
+			recipient = escapeHTML(in.ShippingName) + " · " + escapeHTML(in.ShippingPhone)
+		case in.ShippingName != "":
+			recipient = escapeHTML(in.ShippingName)
+		case in.ShippingPhone != "":
+			recipient = escapeHTML(in.ShippingPhone)
+		}
+		addrLine := ""
+		if in.ShippingAddress != "" {
+			addrLine = fmt.Sprintf(
+				`<div style="margin-top:4px;color:%s;font-size:13px;line-height:1.5;">%s</div>`,
+				brandMuted, escapeHTML(in.ShippingAddress))
+		}
+		recipientLine := ""
+		if recipient != "" {
+			recipientLine = fmt.Sprintf(
+				`<div style="font-weight:600;color:%s;font-size:14px;">%s</div>`,
+				brandDark, recipient)
+		}
+		shippingSection = fmt.Sprintf(`
+		  <h3 style="margin:24px 0 12px 0;font-size:16px;color:%s;">Địa chỉ giao hàng</h3>
+		  <div style="border:1px solid %s;border-radius:8px;padding:14px 16px;background:%s;">
+		    %s
+		    %s
+		  </div>`,
+			brandDark, brandBorder, brandLight, recipientLine, addrLine)
+	}
+
 	// Items section
 	itemsSection := ""
 	if len(in.Items) > 0 {
@@ -298,9 +333,15 @@ func TmplPaymentSuccess(in PaymentSuccessInput) (string, string) {
 
 	body := envelope(fmt.Sprintf(`
 		<div style="background:linear-gradient(135deg,%s 0%%,%s 100%%);padding:32px 24px;text-align:center;color:#fff;">
-		  <div style="width:56px;height:56px;margin:0 auto 12px auto;border-radius:50%%;background:#FFFFFF;display:flex;align-items:center;justify-content:center;">
-		    <span style="color:%s;font-size:32px;font-weight:700;line-height:56px;">✓</span>
-		  </div>
+		  <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center"
+		         style="margin:0 auto 12px auto;border-collapse:separate;background:#FFFFFF;border-radius:28px;">
+		    <tr>
+		      <td align="center" valign="middle"
+		          style="width:56px;height:56px;color:%s;font-family:'Segoe UI',Arial,sans-serif;font-size:32px;font-weight:700;line-height:1;">
+		        ✓
+		      </td>
+		    </tr>
+		  </table>
 		  <h1 style="margin:0;font-size:24px;font-weight:700;">Thanh toán thành công!</h1>
 		  <p style="margin:8px 0 0 0;opacity:0.95;font-size:13px;">%s</p>
 		</div>
@@ -320,6 +361,7 @@ func TmplPaymentSuccess(in PaymentSuccessInput) (string, string) {
 		        <td style="padding:10px 12px;background:%s;font-weight:600;">%s</td></tr>
 		  </table>
 		  %s
+		  %s
 		  <p style="margin:24px 0 0 0;text-align:center;font-size:14px;">
 		    Cảm ơn bạn đã mua sắm tại <strong style="color:%s;">Tropia!</strong>
 		  </p>
@@ -333,6 +375,7 @@ func TmplPaymentSuccess(in PaymentSuccessInput) (string, string) {
 		brandLight, brandMuted, brandLight, in.TransactionID,
 		brandMuted, in.Method,
 		brandLight, brandMuted, brandLight, time.Now().Format("15:04:05 02/01/2006"),
+		shippingSection,
 		itemsSection,
 		brandPrimary, brandMuted))
 	return subject, body
@@ -347,6 +390,11 @@ type PaymentSuccessInput struct {
 	TotalPrice     int           // final amount after discount (VND)
 	DiscountAmount int           // 0 = no voucher line
 	Items          []PaymentItem // empty → omit product table
+	// Delivery address — all blank → address block is omitted (matches
+	// the pickup-at-store flow where no shipping info was collected).
+	ShippingName    string
+	ShippingPhone   string
+	ShippingAddress string
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

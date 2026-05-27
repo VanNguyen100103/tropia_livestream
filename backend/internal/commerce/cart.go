@@ -2,6 +2,7 @@ package commerce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -16,20 +17,24 @@ import (
 )
 
 type CartItem struct {
-	ID            uuid.UUID `json:"id"`
-	UserID        uuid.UUID `json:"user_id"`
-	VariantID     uuid.UUID `json:"variant_id"`
-	ProductID     *uuid.UUID `json:"product_id,omitempty"`
-	ProductName   string    `json:"product_name"`
-	ShopID        *uuid.UUID `json:"shop_id,omitempty"`
-	ShopName      *string   `json:"shop_name,omitempty"`
-	ImageURL      *string   `json:"image_url,omitempty"`
-	Attributes    []byte    `json:"attributes"`
-	UnitPrice     int       `json:"unit_price"`
-	OriginalPrice int       `json:"original_price"`
-	Quantity      int       `json:"quantity"`
-	IsSelected    bool      `json:"is_selected"`
-	AddedAt       time.Time `json:"added_at"`
+	ID          uuid.UUID  `json:"id"`
+	UserID      uuid.UUID  `json:"user_id"`
+	VariantID   uuid.UUID  `json:"variant_id"`
+	ProductID   *uuid.UUID `json:"product_id,omitempty"`
+	ProductName string     `json:"product_name"`
+	ShopID      *uuid.UUID `json:"shop_id,omitempty"`
+	ShopName    *string    `json:"shop_name,omitempty"`
+	ImageURL    *string    `json:"image_url,omitempty"`
+	// Attributes is the raw JSONB blob from cart_items.attributes. Using
+	// json.RawMessage (not []byte) so json.Marshal emits the array
+	// verbatim — a plain []byte would be base64-encoded ("W10=" for "[]"),
+	// which crashes the Flutter parser expecting a List.
+	Attributes    json.RawMessage `json:"attributes"`
+	UnitPrice     int             `json:"unit_price"`
+	OriginalPrice int             `json:"original_price"`
+	Quantity      int             `json:"quantity"`
+	IsSelected    bool            `json:"is_selected"`
+	AddedAt       time.Time       `json:"added_at"`
 }
 
 type CartRepository struct{ Pool *pgxpool.Pool }
@@ -109,11 +114,22 @@ func (r *CartRepository) Upsert(ctx context.Context, it CartItem) (*CartItem, er
 	return &out, nil
 }
 
-func (r *CartRepository) UpdateQty(ctx context.Context, userID, itemID uuid.UUID, qty int) error {
-	_, err := r.Pool.Exec(ctx,
-		`UPDATE cart_items SET quantity = $3 WHERE id = $2 AND user_id = $1`,
-		userID, itemID, qty)
-	return err
+// UpdateQty updates a cart row's quantity and returns the refreshed
+// item. The frontend's cart provider expects the full row back so it can
+// reconcile its local state in one round-trip (no second GET /cart) —
+// returning 204 here caused "type 'String' is not a subtype of
+// Map<String, dynamic>" in the Flutter cast on the empty body.
+func (r *CartRepository) UpdateQty(ctx context.Context, userID, itemID uuid.UUID, qty int) (*CartItem, error) {
+	const q = `
+		UPDATE cart_items SET quantity = $3 WHERE id = $2 AND user_id = $1
+		RETURNING id, user_id, variant_id, product_id, product_name, shop_id, shop_name, image_url,
+		          attributes, unit_price, original_price, quantity, is_selected, added_at
+	`
+	var out CartItem
+	if err := scanCart(r.Pool.QueryRow(ctx, q, userID, itemID, qty), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (r *CartRepository) UpdateSelected(ctx context.Context, userID, itemID uuid.UUID, selected bool) error {
@@ -187,16 +203,23 @@ func NewCartHandler(repo *CartRepository) *CartHandler {
 }
 
 func (h *CartHandler) Register(r *gin.RouterGroup, authMw gin.HandlerFunc) {
-	g := r.Group("/", authMw)
-	g.GET("", h.list)
-	g.POST("/items", h.addItem)
-	g.POST("/items/from-live", h.addItemFromLive)
+	// Attach routes directly to `r` (= /api/cart) rather than nesting
+	// `r.Group("/", authMw)` — the inner Group("/") produces a base path
+	// with a trailing slash, so `GET ""` would resolve to `/api/cart/`.
+	// Gin's RedirectTrailingSlash then 301-redirects `/api/cart` →
+	// `/api/cart/` *without* CORS headers (the 301 short-circuits before
+	// the CORS middleware runs), and browsers block credentialed XHRs on
+	// such redirects. Registering at the exact path keeps the response on
+	// the CORS-wrapped route.
+	r.GET("", authMw, h.list)
+	r.POST("/items", authMw, h.addItem)
+	r.POST("/items/from-live", authMw, h.addItemFromLive)
 	// IMPORTANT: register /items/selected BEFORE /items/:id to avoid the Node.js bug
-	g.DELETE("/items/selected", h.removeSelected)
-	g.PATCH("/select-all", h.selectAll)
-	g.PATCH("/items/:id/qty", h.updateQty)
-	g.PATCH("/items/:id/select", h.updateSelected)
-	g.DELETE("/items/:id", h.remove)
+	r.DELETE("/items/selected", authMw, h.removeSelected)
+	r.PATCH("/select-all", authMw, h.selectAll)
+	r.PATCH("/items/:id/qty", authMw, h.updateQty)
+	r.PATCH("/items/:id/select", authMw, h.updateSelected)
+	r.DELETE("/items/:id", authMw, h.remove)
 }
 
 func (h *CartHandler) list(c *gin.Context) {
@@ -289,22 +312,44 @@ func (h *CartHandler) addItemFromLive(c *gin.Context) {
 	}
 	pool := h.repo.Pool
 	var (
+		productID   *uuid.UUID
 		productName string
 		imageURL    *string
 		original    float64
 		sale        float64
+		shopID      *uuid.UUID
+		shopName    *string
 	)
+	// Join to live_sessions → shops so the cart row carries the seller's
+	// shop (cart UI groups items by shop). product_id may be NULL when the
+	// live item isn't backed by a catalog product — fall back to the
+	// live_session_products.id (= variant_id) so the frontend always has
+	// a non-null string to render.
 	err := pool.QueryRow(c.Request.Context(),
-		`SELECT product_name, image_url, original_price, sale_price
-		 FROM live_session_products WHERE id = $1 AND session_id = $2`,
-		req.LiveProductID, req.SessionID).Scan(&productName, &imageURL, &original, &sale)
+		`SELECT lsp.product_id, lsp.product_name, lsp.image_url,
+		        lsp.original_price, lsp.sale_price,
+		        sh.id, sh.name
+		 FROM live_session_products lsp
+		 JOIN live_sessions ls ON ls.id = lsp.session_id
+		 LEFT JOIN shops sh ON sh.seller_id = ls.seller_id
+		 WHERE lsp.id = $1 AND lsp.session_id = $2`,
+		req.LiveProductID, req.SessionID).
+		Scan(&productID, &productName, &imageURL, &original, &sale, &shopID, &shopName)
 	if err != nil {
 		c.Error(httpx.NewNotFound("live product not found"))
 		return
 	}
+	// Fall back to the live product id when the live item isn't linked to
+	// a catalog product — keeps cart_items.product_id NOT-NULL-ish for the
+	// frontend grouping logic without changing the schema.
+	if productID == nil {
+		productID = &req.LiveProductID
+	}
 	item, err := h.repo.Upsert(c.Request.Context(), CartItem{
-		UserID: uid, VariantID: req.LiveProductID, ProductName: productName,
-		ImageURL: imageURL,
+		UserID: uid, VariantID: req.LiveProductID,
+		ProductID: productID, ProductName: productName,
+		ShopID: shopID, ShopName: shopName,
+		ImageURL:  imageURL,
 		UnitPrice: int(sale), OriginalPrice: int(original), Quantity: req.Quantity,
 		Attributes: []byte(`[]`),
 	})
@@ -330,8 +375,16 @@ func (h *CartHandler) updateQty(c *gin.Context) {
 		c.Error(httpx.NewValidation(err.Error(), nil))
 		return
 	}
-	_ = h.repo.UpdateQty(c.Request.Context(), uid, itemID, body.Quantity)
-	c.Status(http.StatusNoContent)
+	item, err := h.repo.UpdateQty(c.Request.Context(), uid, itemID, body.Quantity)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.Error(httpx.NewNotFound("cart item not found"))
+			return
+		}
+		c.Error(httpx.NewInternal("update qty", err))
+		return
+	}
+	c.JSON(http.StatusOK, item)
 }
 
 func (h *CartHandler) updateSelected(c *gin.Context) {

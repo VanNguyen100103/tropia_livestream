@@ -48,11 +48,19 @@ Redis → host port `6380`. SRS → 1935 (RTMP) / 8080 (HLS) / 1985 (HTTP API).
 
 ```bash
 cd backend
-go run ./cmd/api
+make run            # default — SRS_*_HOST stays as localhost
+make dev-api        # for testing on a physical phone over Wi-Fi —
+                    # auto-detects this machine's LAN IPv4 and exports
+                    # SRS_RTMP_HOST/SRS_HLS_HOST/SRS_WHIP_HOST before
+                    # launching the API. No code edits when Wi-Fi changes.
 ```
 
 Reads `backend/.env.development` (gitignored). Listens on `:3000`.
 Health: `curl http://localhost:3000/health`.
+
+**Wi-Fi changed?** Restart with `make dev-api` (backend) + `make dev-mobile`
+(Flutter). Both scripts re-detect the LAN IP on each launch, so the host's
+IP is never hardcoded in any file.
 
 ### 2b. Database migrations
 
@@ -108,11 +116,32 @@ for the full list of fixtures.
 ```bash
 cd frontend
 flutter pub get
-flutter run
+
+# Pick one based on target:
+make dev-web        # Chrome → http://localhost:3000
+make dev-emu        # Android emulator → http://10.0.2.2:3000
+make dev-mobile     # Physical phone on Wi-Fi → auto-detects LAN IP,
+                    # opens firewall, injects --dart-define=BACKEND_URL=...
 ```
 
-Android emulator targets `http://10.0.2.2:3000` for the backend.
-Physical device on same LAN → set the LAN IP of your host machine.
+`make dev-mobile` runs `scripts/dev-mobile.ps1` on Windows or
+`scripts/dev-mobile.sh` on macOS/Linux. The script auto-discovers the host's
+LAN IPv4 (Wi-Fi preferred over Ethernet, ignores APIPA + Hyper-V virtual
+switches) and launches `flutter run --dart-define=BACKEND_URL=http://<lan-ip>:3000`.
+
+Production / staging builds:
+
+```bash
+make build-prod                                  # → https://api.tropia.vn
+make build-prod PROD_URL=https://api.tropia.vn   # explicit
+make build-staging                               # → https://staging-api.tropia.vn
+```
+
+`AppConfig.backendUrl` resolution (highest priority first):
+1. `--dart-define=BACKEND_URL=...` at build/run time
+2. `kIsWeb` → `localhost:3000`
+3. Android → `10.0.2.2:3000`
+4. iOS sim / desktop → `localhost:3000`
 
 ## Key endpoints (Go backend)
 
@@ -239,5 +268,5 @@ the audit):
   subtotal for cart checkout.
 - `cart_items.variant_id` holds either `product_variants.id` OR
   `live_session_products.id`.
-- `live_sessions.agora_channel` is now the SRS stream key (field name
-  kept for back-compat).
+- `live_sessions.stream_key` holds the SRS stream key. (Was named
+  `agora_channel` before Phase 16; migration 0003 renamed it.)

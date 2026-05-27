@@ -239,9 +239,8 @@ CREATE TABLE live_sessions (
     description         TEXT,
     cover_image_url     TEXT,
     category            TEXT,
-    -- SRS stream key (called "agora_channel" for back-compat with old code)
-    -- format: live_<16hex>
-    agora_channel       TEXT NOT NULL UNIQUE,
+    -- SRS stream key, format: live_<16hex>
+    stream_key          TEXT NOT NULL UNIQUE,
     status              TEXT NOT NULL DEFAULT 'live'
                         CHECK (status IN ('scheduled', 'live', 'ended')),
     started_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -261,7 +260,7 @@ CREATE TABLE live_sessions (
 
 CREATE INDEX idx_live_sessions_seller ON live_sessions(seller_id);
 CREATE INDEX idx_live_sessions_status ON live_sessions(status, started_at DESC);
-CREATE INDEX idx_live_sessions_channel ON live_sessions(agora_channel);
+CREATE INDEX idx_live_sessions_stream_key ON live_sessions(stream_key);
 
 -- =============================================================================
 -- 12. LIVE_SESSION_PRODUCTS (snapshot)
@@ -298,6 +297,18 @@ CREATE TABLE live_viewers (
 
 CREATE INDEX idx_live_viewers_session ON live_viewers(session_id);
 
+-- Per-session unique follower dedupe (mirrors live_viewers). Insert from
+-- TrackFollow uses ON CONFLICT DO NOTHING so the same user tapping the
+-- "+ Theo dõi" pill multiple times only counts once.
+CREATE TABLE live_session_follows (
+    session_id  UUID NOT NULL REFERENCES live_sessions(id) ON DELETE CASCADE,
+    user_id     UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    followed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (session_id, user_id)
+);
+
+CREATE INDEX idx_live_session_follows_session ON live_session_follows(session_id);
+
 -- =============================================================================
 -- 14. CHAT_MESSAGES
 -- =============================================================================
@@ -310,7 +321,7 @@ CREATE TABLE chat_messages (
     message     TEXT NOT NULL,
     is_host     BOOLEAN,
     type        TEXT NOT NULL DEFAULT 'text'
-                CHECK (type IN ('text', 'emoji', 'system')),
+                CHECK (type IN ('text', 'emoji', 'system', 'bot', 'bot_error')),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -482,6 +493,25 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER live_viewers_count_trigger
     AFTER INSERT OR DELETE ON live_viewers
     FOR EACH ROW EXECUTE FUNCTION update_live_viewer_count();
+
+-- follow_count trigger on live_session_follows insert/delete
+CREATE OR REPLACE FUNCTION update_live_follow_count()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_OP = 'INSERT') THEN
+        UPDATE live_sessions SET follow_count = follow_count + 1 WHERE id = NEW.session_id;
+        RETURN NEW;
+    ELSIF (TG_OP = 'DELETE') THEN
+        UPDATE live_sessions SET follow_count = GREATEST(0, follow_count - 1) WHERE id = OLD.session_id;
+        RETURN OLD;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER live_session_follows_count_trigger
+    AFTER INSERT OR DELETE ON live_session_follows
+    FOR EACH ROW EXECUTE FUNCTION update_live_follow_count();
 
 -- =============================================================================
 -- RPC functions (preserve Node.js compatibility)

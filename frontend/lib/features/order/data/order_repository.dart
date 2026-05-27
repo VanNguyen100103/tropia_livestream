@@ -44,32 +44,39 @@ class OrderRepository {
     return (items: items, total: (data['total'] as num? ?? items.length).toInt());
   }
 
-  /// POST /api/orders/checkout — đặt hàng từ giỏ hàng thường
-  /// Trả về list orders và summary
+  /// POST /api/orders/checkout — đặt hàng từ giỏ hàng thường.
+  /// Backend đọc `cart_items WHERE is_selected = TRUE` cho buyer hiện tại,
+  /// validate từng `coupon_codes[i]` (active / chưa dùng / đạt min), cộng
+  /// discount, tạo order tổng hợp. `items` / `note` / `discountAmount` FE
+  /// gửi xuống hiện chưa được backend dùng tới.
+  ///
+  /// `shippingName` / `shippingPhone` / `shippingAddress` được lưu vào
+  /// live_orders + đính kèm vào event `payment.success` để email biên
+  /// lai hiển thị địa chỉ giao hàng. Tab "Nhận tại cửa hàng" để trống.
   Future<({List<OrderModel> orders, int grandTotal, int couponDiscount})> checkout({
     required List<CheckoutItem> items,
-    String? couponCode,
+    List<String> couponCodes = const [],
     int discountAmount = 0,
     String paymentMethod = 'cod',
     String? note,
+    String? shippingName,
+    String? shippingPhone,
+    String? shippingAddress,
   }) async {
     final res = await _dio.post('/api/orders/checkout', data: {
-      'items': items.map((i) => i.toJson()).toList(),
-      if (couponCode != null) 'couponCode': couponCode,
-      if (discountAmount > 0) 'discountAmount': discountAmount,
-      'paymentMethod': paymentMethod,
-      if (note != null && note.isNotEmpty) 'note': note,
+      if (couponCodes.isNotEmpty) 'coupon_codes': couponCodes,
+      'payment_method': paymentMethod,
+      if (shippingName    != null && shippingName.isNotEmpty)    'shipping_name':    shippingName,
+      if (shippingPhone   != null && shippingPhone.isNotEmpty)   'shipping_phone':   shippingPhone,
+      if (shippingAddress != null && shippingAddress.isNotEmpty) 'shipping_address': shippingAddress,
     });
     final data = res.data as Map<String, dynamic>;
-    final orderList = (data['orders'] as List)
-        .map((e) => OrderModel.fromJson(e as Map<String, dynamic>))
-        .toList();
-    final summary = data['summary'] as Map<String, dynamic>;
-    AppLogger.logInfo(_tag, 'Cart checkout: ${orderList.length} orders, total=${summary['grandTotal']}');
+    final order = OrderModel.fromJson(data['order'] as Map<String, dynamic>);
+    AppLogger.logInfo(_tag, 'Cart checkout: order=${order.id}, total=${order.totalPrice}');
     return (
-      orders: orderList,
-      grandTotal: (summary['grandTotal'] as num).toInt(),
-      couponDiscount: (summary['couponDiscount'] as num? ?? 0).toInt(),
+      orders: [order],
+      grandTotal: order.totalPrice,
+      couponDiscount: order.discountAmount,
     );
   }
 

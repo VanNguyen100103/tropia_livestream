@@ -5,21 +5,37 @@
 // =============================================================================
 
 import 'dart:convert';
+import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:tropia/core/config/app_config.dart';
 import 'package:tropia/core/utils/logger.dart';
 
 const _tag = 'AuthService';
+// Token keys live in flutter_secure_storage (Keychain / EncryptedSharedPreferences
+// / libsecret). Non-secret display metadata (name, email, role) stays in
+// SharedPreferences because it's refreshed from /api/auth/me on every
+// startup anyway and isn't security-sensitive on its own.
 const _kAccessToken  = 'auth_access_token';
 const _kRefreshToken = 'auth_refresh_token';
 const _kUserId       = 'auth_user_id';
 const _kUserRole     = 'auth_user_role';
 const _kUserName     = 'auth_user_name';
 const _kUserEmail    = 'auth_user_email';
+
+// Use EncryptedSharedPreferences on Android (API 23+) so values are
+// AES-256 wrapped with a key in AndroidKeyStore. iOS / macOS default to
+// Keychain with first_unlock accessibility, which matches our re-launch
+// flow (tokens needed before the user authenticates).
+const _secureStorage = FlutterSecureStorage(
+  aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+);
 
 class AuthUser {
   final String id;
@@ -49,6 +65,12 @@ class AuthService extends ChangeNotifier {
   String?   _accessToken;
   String?   _refreshToken;
 
+  // Holds the PKCE code_verifier between [loginWithGoogle] (which opens
+  // the browser) and [handleGoogleCallback] (which spends the OTC). Kept
+  // in memory only — if the app is killed mid-flow the user just needs
+  // to retry, which is safer than persisting the verifier to disk.
+  String? _pendingGoogleVerifier;
+
   AuthUser? get currentUser    => _user;
   String?   get accessToken    => _accessToken;
   bool      get isSignedIn     => _user != null && _accessToken != null;
@@ -58,8 +80,27 @@ class AuthService extends ChangeNotifier {
 
   Future<void> initialize() async {
     final prefs = await SharedPreferences.getInstance();
-    _accessToken  = prefs.getString(_kAccessToken);
-    _refreshToken = prefs.getString(_kRefreshToken);
+
+    _accessToken  = await _secureStorage.read(key: _kAccessToken);
+    _refreshToken = await _secureStorage.read(key: _kRefreshToken);
+
+    // One-time migration: older builds stored tokens in SharedPreferences.
+    // Move them to secure storage and wipe the plaintext copy. Safe to drop
+    // this block once analytics show no users on those builds.
+    if (_accessToken == null) {
+      final legacyAccess  = prefs.getString(_kAccessToken);
+      final legacyRefresh = prefs.getString(_kRefreshToken);
+      if (legacyAccess != null) {
+        await _secureStorage.write(key: _kAccessToken, value: legacyAccess);
+        _accessToken = legacyAccess;
+      }
+      if (legacyRefresh != null) {
+        await _secureStorage.write(key: _kRefreshToken, value: legacyRefresh);
+        _refreshToken = legacyRefresh;
+      }
+      await prefs.remove(_kAccessToken);
+      await prefs.remove(_kRefreshToken);
+    }
 
     if (_accessToken != null) {
       final id    = prefs.getString(_kUserId)    ?? '';
@@ -131,15 +172,41 @@ class AuthService extends ChangeNotifier {
 
   // ── Google OAuth ────────────────────────────────────────────────────────────
 
-  /// Mở browser để đăng nhập Google.
-  /// Sau khi Google redirect về deep link tropia://auth/callback?token=...&refresh=...
-  /// gọi [handleGoogleCallback] để lưu session.
+  /// Mở browser để đăng nhập Google. Sinh PKCE code_verifier rồi gửi
+  /// code_challenge (S256) lên backend qua query — nếu một app khác cùng
+  /// đăng ký scheme `tropia://` chặn được deep-link, nó vẫn không đổi
+  /// được OTC lấy JWT vì thiếu verifier.
   Future<void> loginWithGoogle() async {
-    final url = Uri.parse('${AppConfig.backendUrl}/api/auth/google');
+    final verifier = _generatePkceVerifier();
+    final challenge = _pkceChallenge(verifier);
+    _pendingGoogleVerifier = verifier;
+
+    final url = Uri.parse(
+      '${AppConfig.backendUrl}/api/auth/google'
+      '?code_challenge=$challenge&code_challenge_method=S256',
+    );
     if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
+      _pendingGoogleVerifier = null;
       throw Exception('Không thể mở trình duyệt để đăng nhập Google');
     }
-    AppLogger.logInfo(_tag, 'Opened Google OAuth browser');
+    AppLogger.logInfo(_tag, 'Opened Google OAuth browser (PKCE)');
+  }
+
+  /// RFC 7636 §4.1: code_verifier is 43-128 chars from the unreserved set
+  /// [A-Z a-z 0-9 - . _ ~]. We use 64 chars of base64url-encoded random
+  /// bytes (no padding) which gives ~384 bits of entropy.
+  String _generatePkceVerifier() {
+    final rng = Random.secure();
+    final bytes = Uint8List(48); // 48 bytes → 64 base64url chars
+    for (var i = 0; i < bytes.length; i++) {
+      bytes[i] = rng.nextInt(256);
+    }
+    return base64Url.encode(bytes).replaceAll('=', '');
+  }
+
+  String _pkceChallenge(String verifier) {
+    final digest = sha256.convert(utf8.encode(verifier));
+    return base64Url.encode(digest.bytes).replaceAll('=', '');
   }
 
   /// Gọi sau khi app nhận deep link từ Google OAuth callback.
@@ -157,7 +224,13 @@ class AuthService extends ChangeNotifier {
 
     try {
       // Đổi one-time code lấy JWT (token không bao giờ xuất hiện trong URL)
-      final res = await _dio.get('/api/auth/google/exchange', queryParameters: {'code': code});
+      // PKCE: gửi kèm verifier để backend verify code_challenge.
+      final verifier = _pendingGoogleVerifier;
+      _pendingGoogleVerifier = null; // single-use
+      final res = await _dio.get('/api/auth/google/exchange', queryParameters: {
+        'code': code,
+        if (verifier != null) 'code_verifier': verifier,
+      });
       final data = res.data as Map<String, dynamic>;
 
       final accessToken = (data['access_token'] ?? data['accessToken']) as String;
@@ -333,9 +406,12 @@ class AuthService extends ChangeNotifier {
       avatarUrl: userMap['avatarUrl'] as String?,
     );
 
+    await _secureStorage.write(key: _kAccessToken, value: _accessToken!);
+    if (_refreshToken != null) {
+      await _secureStorage.write(key: _kRefreshToken, value: _refreshToken!);
+    }
+
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_kAccessToken,  _accessToken!);
-    if (_refreshToken != null) await prefs.setString(_kRefreshToken, _refreshToken!);
     await prefs.setString(_kUserId,    _user!.id);
     await prefs.setString(_kUserRole,  _user!.role);
     await prefs.setString(_kUserName,  _user!.name);
@@ -349,7 +425,11 @@ class AuthService extends ChangeNotifier {
     _accessToken  = null;
     _refreshToken = null;
     _user         = null;
+    await _secureStorage.delete(key: _kAccessToken);
+    await _secureStorage.delete(key: _kRefreshToken);
     final prefs   = await SharedPreferences.getInstance();
+    // Defensive: also drop any legacy SharedPreferences token copies that
+    // pre-date the secure-storage migration.
     await prefs.remove(_kAccessToken);
     await prefs.remove(_kRefreshToken);
     await prefs.remove(_kUserId);

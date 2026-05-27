@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -126,6 +127,7 @@ func main() {
 	catRepo := catalog.NewCategoryRepository(db)
 	prodRepo := catalog.NewProductRepository(db)
 	sessRepo := live.NewSessionRepository(db)
+	liveEventsRepo := live.NewEventRepository(db)
 	cartRepo := commerce.NewCartRepository(db)
 	orderRepo := commerce.NewOrderRepository(db)
 	cpnRepo := commerce.NewCouponRepository(db)
@@ -139,7 +141,9 @@ func main() {
 		WHIPHost: cfg.SRSWhipHost,
 		SRTPort:  10080,
 	})
-	orderSvc := commerce.NewOrderService(db, orderRepo, cartRepo, cpnRepo, cc).WithEvents(bus)
+	orderSvc := commerce.NewOrderService(db, orderRepo, cartRepo, cpnRepo, cc).
+		WithEvents(bus).
+		WithBuyerLookup(authBuyerLookup{repo: authRepo})
 
 	// HTTP
 	router := gin.New()
@@ -149,13 +153,37 @@ func main() {
 	router.Use(httpx.AuditLog(logger))
 	router.Use(httpx.ErrorHandler(logger))
 	router.Use(httpx.RequestSizeGuard(64, "/api/upload"))
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{cfg.CORSOrigin},
+	// CORS — whitelist per-environment via CORS_ORIGIN. We refuse to boot
+	// in release mode if the list is empty (`*` + AllowCredentials is
+	// invalid per CORS spec). In dev we fall back to localhost defaults
+	// so a forgotten/legacy `CORS_ORIGIN=*` doesn't panic gin-contrib's
+	// cors.New (which requires AllowOrigins non-empty when AllowCredentials).
+	corsOrigins := cfg.CORSOrigins
+	corsCfg := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Request-ID"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
-	}))
+	}
+	if len(corsOrigins) == 0 {
+		if gin.Mode() == gin.ReleaseMode {
+			log.Fatalf("CORS_ORIGIN must be set to a comma-separated whitelist in release mode (not `*`)")
+		}
+		// Dev: `flutter run -d chrome` picks a random port, so a fixed
+		// whitelist would 403 every restart. Accept any loopback origin
+		// (localhost / 127.0.0.1 / 10.0.2.2 — Android emulator → host)
+		// regardless of port. Release mode still requires an explicit
+		// whitelist via CORS_ORIGIN.
+		logger.Warn("CORS_ORIGIN empty/wildcard — dev mode: allowing any loopback origin")
+		corsCfg.AllowOriginFunc = func(origin string) bool {
+			return strings.HasPrefix(origin, "http://localhost:") ||
+				strings.HasPrefix(origin, "http://127.0.0.1:") ||
+				strings.HasPrefix(origin, "http://10.0.2.2:")
+		}
+	} else {
+		corsCfg.AllowOrigins = corsOrigins
+	}
+	router.Use(cors.New(corsCfg))
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "tropia-backend", "ts": time.Now().Unix()})
@@ -164,7 +192,39 @@ func main() {
 	// Prometheus
 	metrics := httpx.NewMetrics()
 	router.Use(metrics.Middleware())
-	router.GET("/metrics", httpx.MetricsHandler())
+	// Prometheus metrics — gated behind METRICS_TOKEN to keep traffic
+	// patterns + business volumes off the public internet. Prometheus
+	// server sends the token as `Authorization: Bearer <token>`. Empty
+	// token in dev disables the check; release mode requires it.
+	metricsToken := os.Getenv("METRICS_TOKEN")
+	if gin.Mode() == gin.ReleaseMode && metricsToken == "" {
+		log.Fatalf("METRICS_TOKEN must be set in release mode (otherwise /metrics leaks business metrics to the public)")
+	}
+	router.GET("/metrics", func(c *gin.Context) {
+		if metricsToken != "" {
+			got := c.GetHeader("Authorization")
+			if got != "Bearer "+metricsToken {
+				c.Status(http.StatusUnauthorized)
+				return
+			}
+		}
+		httpx.MetricsHandler()(c)
+	})
+
+	// OpenAPI 3.1 spec — covers /api/auth, /api/live, /api/orders,
+	// /api/shops, /api/upload, and the system endpoints. Closes OWASP
+	// API9 (Improper Inventory Management). Served as a static file
+	// from backend/docs/openapi.yaml. In production, gate behind the
+	// same DOCS_TOKEN header so the spec doesn't leak the endpoint
+	// surface to drive-by scanners.
+	docsToken := os.Getenv("DOCS_TOKEN")
+	router.GET("/docs/openapi.yaml", func(c *gin.Context) {
+		if docsToken != "" && c.GetHeader("Authorization") != "Bearer "+docsToken {
+			c.Status(http.StatusUnauthorized)
+			return
+		}
+		c.File("docs/openapi.yaml")
+	})
 
 	authMw := auth.Middleware(jwtSvc)
 	sellerMw := auth.RequireRole(auth.RoleSeller, auth.RoleAdmin)
@@ -179,9 +239,9 @@ func main() {
 		ClientURL:         clientURL,
 		CookieSecure:      gin.Mode() == gin.ReleaseMode,
 	})
-	authH.Register(router.Group("/api/auth"), authMw)
+	authH.Register(router.Group("/api/auth"), authMw, cc)
 
-	googleOAuth := auth.NewGoogleOAuth(authSvc, auth.GoogleOAuthConfig{
+	googleOAuth := auth.NewGoogleOAuth(authSvc, rds, auth.GoogleOAuthConfig{
 		ClientID:     cfg.GoogleClientID,
 		ClientSecret: cfg.GoogleClientSecret,
 		RedirectURL:  cfg.GoogleRedirectURL,
@@ -191,15 +251,23 @@ func main() {
 	googleOAuth.Register(router.Group("/api/auth"))
 
 	// Live
-	liveH := live.NewHandler(liveSvc, sessRepo, cc)
+	liveH := live.NewHandler(liveSvc, sessRepo, cc).
+		WithAI(deepseek).
+		WithCoupons(cpnRepo).
+		WithEvents(liveEventsRepo)
 	liveH.Register(router.Group("/api/live"), authMw, sellerMw)
 
 	// AI endpoints (DeepSeek-backed) on top of live sessions
-	aiH := live.NewAIHandler(deepseek, sessRepo)
+	aiH := live.NewAIHandler(deepseek, sessRepo).WithCoupons(cpnRepo)
 	aiH.Register(router.Group("/api/live"), authMw, sellerMw)
 
 	// SRS webhooks
-	srsH := srs.NewHandler(sessRepo).WithEvents(bus)
+	srsH := srs.NewHandler(sessRepo).
+		WithEvents(bus).
+		WithSecret(os.Getenv("SRS_WEBHOOK_SECRET"))
+	if gin.Mode() == gin.ReleaseMode && os.Getenv("SRS_WEBHOOK_SECRET") == "" {
+		log.Fatalf("SRS_WEBHOOK_SECRET must be set in release mode (webhook would accept forged on_publish/on_dvr otherwise)")
+	}
 	srsH.Register(router.Group("/api/srs"))
 
 	// Shops
@@ -225,19 +293,26 @@ func main() {
 	cartH := commerce.NewCartHandler(cartRepo)
 	cartH.Register(router.Group("/api/cart"), authMw)
 
+	// Coupons (buyer-facing: discover platform + shop coupons, validate
+	// before checkout). Host coupon CRUD is registered under /api/live by
+	// the live handler — these routes are intentionally separate so the
+	// public list endpoints stay reachable without seller auth.
+	couponH := commerce.NewCouponHandler(cpnRepo)
+	couponH.Register(router.Group("/api/coupons"), authMw)
+
 	// Orders
 	orderH := commerce.NewOrderHandler(orderSvc, orderRepo)
-	orderH.Register(router.Group("/api/orders"), authMw)
+	orderH.Register(router.Group("/api/orders"), authMw, cc)
 
 	// Payment
 	if r2 != nil || true {
-		paymentH := payment.NewHandler(orderRepo, momo, vnpay, zalopay, clientURL)
-		paymentH.Register(router.Group("/api/payment"), authMw)
+		paymentH := payment.NewHandler(orderRepo, orderSvc, momo, vnpay, zalopay, clientURL)
+		paymentH.Register(router.Group("/api/payment"), authMw, cc)
 	}
 
 	// Upload (only if R2 configured)
 	if r2 != nil {
-		uploadH := storage.NewUploadHandler(r2)
+		uploadH := storage.NewUploadHandler(r2, db)
 		uploadH.Register(router.Group("/api/upload"), authMw, sellerMw)
 	}
 
@@ -308,4 +383,17 @@ func splitBearer(h string) string {
 		return h[len(prefix):]
 	}
 	return ""
+}
+
+// authBuyerLookup adapts auth.Repository.FindByID to the minimal
+// commerce.BuyerLookup interface (email + name). Lives in main so the
+// commerce package stays free of an auth import.
+type authBuyerLookup struct{ repo *auth.Repository }
+
+func (a authBuyerLookup) LookupBuyer(ctx context.Context, id uuid.UUID) (commerce.BuyerInfo, error) {
+	p, err := a.repo.FindByID(ctx, id)
+	if err != nil {
+		return commerce.BuyerInfo{}, err
+	}
+	return commerce.BuyerInfo{Email: p.Email, Name: p.Name}, nil
 }

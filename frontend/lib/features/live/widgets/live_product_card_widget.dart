@@ -38,12 +38,19 @@ class LiveProductCardWidget extends StatelessWidget {
   /// Tap nút "Mua ngay"
   final VoidCallback onBuyNow;
 
+  /// Tap nút giỏ hàng — Shopee Live add-to-cart. Null → ẩn nút (e.g.
+  /// the host viewing their own stream doesn't see a cart shortcut).
+  /// Variant products fall back to `onTap` since the buyer must pick a
+  /// SKU before we know what to put in the cart.
+  final VoidCallback? onAddToCart;
+
   const LiveProductCardWidget({
     super.key,
     required this.product,
     required this.streamId,
     required this.onTap,
     required this.onBuyNow,
+    this.onAddToCart,
   });
 
   @override
@@ -98,10 +105,11 @@ class LiveProductCardWidget extends StatelessWidget {
   Widget _buildImageSection() {
     return Stack(
       children: [
-        // Product image
+        // Product image. Smaller (68 vs 100) to match the compact
+        // 96px card width — keeps the image roughly square.
         SizedBox(
           width: double.infinity,
-          height: 100,
+          height: 68,
           child: CachedNetworkImage(
             imageUrl: product.imageUrl,
             fit: BoxFit.cover,
@@ -229,25 +237,44 @@ class LiveProductCardWidget extends StatelessWidget {
       );
     }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    // Sale price + strike-through original price on a SINGLE LINE.
+    // Stacking them vertically (the old layout) made the card run
+    // tall, and on the compact 96px card the two lines also looked
+    // misaligned because the original price's smaller font centered
+    // differently than the sale price. Row + baseline alignment
+    // keeps them visually anchored to the same line. Original price
+    // is hidden when there's no discount, so we don't show
+    // "100K  100K" for full-price items.
+    final hasDiscount = product.originalPrice > product.salePrice;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
       children: [
-        Text(
-          _formatPrice(product.salePrice),
-          style: const TextStyle(
-            color: AppColors.secondary,
-            fontSize: AppSizes.fontSm,
-            fontWeight: FontWeight.w700,
+        Flexible(
+          child: Text(
+            _formatPrice(product.salePrice),
+            style: const TextStyle(
+              color: AppColors.secondary,
+              fontSize: AppSizes.fontSm,
+              fontWeight: FontWeight.w700,
+            ),
+            overflow: TextOverflow.ellipsis,
           ),
         ),
-        Text(
-          _formatPrice(product.originalPrice),
-          style: const TextStyle(
-            color: AppColors.textHint,
-            fontSize: 9,
-            decoration: TextDecoration.lineThrough,
+        if (hasDiscount) ...[
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              _formatPrice(product.originalPrice),
+              style: const TextStyle(
+                color: AppColors.textHint,
+                fontSize: 9,
+                decoration: TextDecoration.lineThrough,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -257,27 +284,59 @@ class LiveProductCardWidget extends StatelessWidget {
   // ─────────────────────────────────────────────────────────────────────────
 
   Widget _buildBuyNowButton() {
-    // Variant products require popup to select options first
+    // Variant products require popup to select options first — both
+    // cart + buy-now buttons route through `onTap` so the SKU picker
+    // pops, then the user picks an action there. Keeps this card free
+    // of variant picker logic.
     final isVariant = product.hasVariants;
+    final showCart = onAddToCart != null;
     return SizedBox(
-      width: double.infinity,
-      height: 26,
-      child: ElevatedButton(
-        onPressed: isVariant ? onTap : onBuyNow,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: AppColors.secondary,
-          foregroundColor: Colors.white,
-          elevation: 0,
-          padding: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(AppSizes.radiusSm),
+      height: 22,
+      child: Row(
+        children: [
+          if (showCart) ...[
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: OutlinedButton(
+                onPressed: isVariant ? onTap : onAddToCart,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.secondary,
+                  side: const BorderSide(color: AppColors.secondary, width: 1),
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppSizes.radiusSm),
+                  ),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Icon(Icons.add_shopping_cart, size: 11),
+              ),
+            ),
+            const SizedBox(width: 3),
+          ],
+          Expanded(
+            child: ElevatedButton(
+              onPressed: isVariant ? onTap : onBuyNow,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.secondary,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                padding: EdgeInsets.zero,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppSizes.radiusSm),
+                ),
+                textStyle: const TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              // Short label fits the compact 96px card without
+              // ellipsis. "Mua ngay" overflowed once the cart button
+              // sat next to it.
+              child: Text(isVariant ? 'Chọn mẫu' : 'Mua'),
+            ),
           ),
-          textStyle: const TextStyle(
-            fontSize: AppSizes.fontXs,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        child: Text(isVariant ? 'Chọn mẫu' : AppStrings.liveBuyNow),
+        ],
       ),
     );
   }

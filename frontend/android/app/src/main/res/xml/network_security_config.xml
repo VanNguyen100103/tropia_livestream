@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release / production network policy.
+
+  Cleartext HTTP is rejected for every destination. All API + HLS playback
+  must go over HTTPS. The debug source set
+  (android/app/src/debug/res/xml/network_security_config.xml) overrides
+  this file with a permissive config for `flutter run` + `make dev-mobile`
+  against localhost / 10.0.2.2 / LAN IPs.
+
+  Note: <domain-config> only matches DNS names, not IP literals. For
+  emulator (10.0.2.2) and LAN IPs we ship the permissive debug-only
+  overlay rather than baking IPs into the release config.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

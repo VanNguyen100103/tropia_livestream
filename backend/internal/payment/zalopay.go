@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/big"
 	"net/http"
 	"strconv"
 	"time"
@@ -49,13 +50,20 @@ type ZaloPayCreateResult struct {
 	AppTransID    string `json:"app_trans_id"`
 }
 
-// makeAppTransID returns "yyMMdd_<random+orderTail>" — matches ZaloPay spec
-// (yyMMdd prefix is required).
+// makeAppTransID returns "yyMMdd_<random>" — matches ZaloPay spec
+// (yyMMdd prefix is required). The random tail uses crypto/rand so the
+// resulting app_trans_id is unpredictable; math/rand would let an attacker
+// enumerate / spoof in-flight transaction IDs.
 func makeAppTransID(orderID string) string {
 	now := time.Now().In(vietnamLoc())
 	prefix := now.Format("060102")
-	tail := strconv.FormatInt(rand.Int63n(1_000_000_000), 10)
-	return fmt.Sprintf("%s_%s", prefix, tail)
+	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000_000))
+	if err != nil {
+		// crypto/rand failure is fatal in practice; fall back to a
+		// time-derived tail rather than 0 so transactions stay distinct.
+		return fmt.Sprintf("%s_%d", prefix, now.UnixNano())
+	}
+	return fmt.Sprintf("%s_%09d", prefix, n.Int64())
 }
 
 func vietnamLoc() *time.Location {
@@ -101,7 +109,7 @@ func (z *ZaloPay) Create(ctx context.Context, in ZaloPayCreateInput) (*ZaloPayCr
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := paymentHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
