@@ -1534,7 +1534,18 @@ class _CheckoutBar extends StatelessWidget {
       MaterialPageRoute<void>(
         builder: (_) => CheckoutScreen(items: selectedItems),
       ),
-    );
+    ).then((_) {
+      // Reload after returning from checkout so the cart reflects what
+      // the backend actually has — for online payments (MoMo / VNPay /
+      // ZaloPay) the pay URL opens in a new tab, the user comes back
+      // here, and MarkPaid (server-side) has already deleted the
+      // checked-out cart_items. Without this refresh the local
+      // CartProvider keeps the stale items and the user sees a paid
+      // cart that should be empty.
+      if (context.mounted) {
+        context.read<CartProvider>().load();
+      }
+    });
   }
 
   String _fmt(int price) {

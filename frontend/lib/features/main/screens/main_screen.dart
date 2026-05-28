@@ -273,6 +273,14 @@ class _MainScreenState extends State<MainScreen> {
     if (index == 2) {
       context.read<LiveProvider>().refresh();
     }
+    // Refresh cart mỗi lần user quay về tab Giỏ hàng — cần thiết vì
+    // CartScreen nằm trong IndexedStack (state preserved) nên
+    // initState chỉ chạy 1 lần. Sau khi thanh toán MoMo/VNPay/ZaloPay
+    // (mở tab mới), backend đã xoá cart_items qua MarkPaid; nếu không
+    // reload ở đây user sẽ thấy giỏ hàng cũ với items đã thanh toán.
+    if (index == 3) {
+      context.read<CartProvider>().load();
+    }
 
     final tabNames = [
       AppStrings.navHome,

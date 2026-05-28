@@ -81,11 +81,11 @@ type PinAsset struct {
 	EndMs   int64   // when to hide
 }
 
-// RenderPinBanner draws a white rounded card with [product image] +
-// [product name] + [price in red]. Mirrors the Flutter _PinBanner
-// widget. If imageURL is non-empty, the image is fetched (with short
-// timeout) and pasted into the card; on fetch error a grey placeholder
-// is drawn instead.
+// RenderPinBanner draws a white rounded card with a red
+// "ĐANG GIỚI THIỆU" badge + [product image] + [product name] + [price
+// in red]. Mirrors the Flutter _PinnedSpotlight widget. If imageURL is
+// non-empty, the image is fetched (with short timeout) and pasted into
+// the card; on fetch error a grey placeholder is drawn instead.
 func RenderPinBanner(ctx context.Context, name string, price float64, imageURL string, outPath string) error {
 	dc := gg.NewContext(pinBannerW, pinBannerH)
 
@@ -94,7 +94,7 @@ func RenderPinBanner(ctx context.Context, name string, price float64, imageURL s
 	dc.DrawRoundedRectangle(0, 0, float64(pinBannerW), float64(pinBannerH), 14)
 	dc.Fill()
 
-	// Product image (40x40) — or placeholder.
+	// Product image (72×72) — or placeholder.
 	imgX, imgY := 8.0, 8.0
 	imgSize := 72.0
 	dc.DrawRoundedRectangle(imgX, imgY, imgSize, imgSize, 10)
@@ -108,23 +108,45 @@ func RenderPinBanner(ctx context.Context, name string, price float64, imageURL s
 	}
 	dc.ResetClip()
 
-	// Name (black, bold).
+	textX := imgX + imgSize + 12
+
+	// Badge "ĐANG GIỚI THIỆU" — red pill at top of right column, mirrors
+	// the pulsing badge in Flutter _PinnedSpotlight (static here — no
+	// animation in a baked PNG, the colour alone reads "live highlight").
+	badgeFace, err := loadFace(13)
+	if err != nil {
+		return err
+	}
+	dc.SetFontFace(badgeFace)
+	badgeText := "ĐANG GIỚI THIỆU"
+	badgeTextW, badgeTextH := dc.MeasureString(badgeText)
+	badgePadX, badgePadY := 7.0, 3.0
+	badgeW := badgeTextW + badgePadX*2
+	badgeH := badgeTextH + badgePadY*2
+	badgeY := 8.0
+	dc.SetRGB255(255, 77, 79) // #FF4D4F
+	dc.DrawRoundedRectangle(textX, badgeY, badgeW, badgeH, 4)
+	dc.Fill()
+	dc.SetRGB(1, 1, 1)
+	dc.DrawString(badgeText, textX+badgePadX, badgeY+badgePadY+badgeTextH-2)
+
+	// Name (black, bold) — below badge.
 	face, err := loadFace(20)
 	if err != nil {
 		return err
 	}
 	dc.SetFontFace(face)
 	dc.SetRGB(0.08, 0.08, 0.08)
-	dc.DrawStringWrapped(name, imgX+imgSize+12, 12, 0, 0, float64(pinBannerW)-imgSize-32, 1.15, gg.AlignLeft)
+	dc.DrawStringWrapped(name, textX, badgeY+badgeH+6, 0, 0, float64(pinBannerW)-imgSize-32, 1.15, gg.AlignLeft)
 
-	// Price (red, larger).
+	// Price (red, larger) — bottom-aligned in the card.
 	priceFace, err := loadFace(22)
 	if err != nil {
 		return err
 	}
 	dc.SetFontFace(priceFace)
 	dc.SetRGB255(229, 57, 53) // red 600
-	dc.DrawString(fmt.Sprintf("%.0fđ", price), imgX+imgSize+12, 70)
+	dc.DrawString(fmt.Sprintf("%.0fđ", price), textX, float64(pinBannerH)-10)
 
 	return savePNG(dc, outPath)
 }

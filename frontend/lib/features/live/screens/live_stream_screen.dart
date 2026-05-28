@@ -209,42 +209,18 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
             // viewers immediately know which item is being demoed.
             if (stream.primaryPinnedProduct != null && stream.pinnedProductIds.isNotEmpty)
               Positioned(
-                left: 12,
-                right: 80,
+                left: 0,
+                right: 0,
                 top: 70,
-                child: _PinnedSpotlight(
-                  product: stream.primaryPinnedProduct!,
-                  onTap: () => _showProductPopup(stream.primaryPinnedProduct!, stream.id),
-                  onBuyNow: () => provider.buyNow(stream.id, stream.primaryPinnedProduct!.id),
-                ),
-              ),
-
-            // Pinned product carousel on the left edge, Shopee Live
-            // style. Sits high on the screen (just below the shop
-            // bar) and extends down to ~bottom 120 so viewers can
-            // scroll multiple pinned items without the column eating
-            // half the video. Width is tight (110) to match the
-            // compact 96px card + scroll padding.
-            if (stream.products.isNotEmpty)
-              Positioned(
-                left: 8,
-                top: stream.primaryPinnedProduct != null ? 150 : 70,
-                bottom: 120,
-                width: 110,
-                child: ListView.separated(
-                  padding: EdgeInsets.zero,
-                  itemCount: stream.products.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 6),
-                  itemBuilder: (_, i) {
-                    final p = stream.products[i];
-                    return LiveProductCardWidget(
-                      product: p,
-                      streamId: stream.id,
-                      onTap: () => _showProductPopup(p, stream.id),
-                      onBuyNow: () => provider.buyNow(stream.id, p.id),
-                      onAddToCart: () => _addToCart(p),
-                    );
-                  },
+                child: Center(
+                  child: SizedBox(
+                    width: 200,
+                    child: _PinnedSpotlight(
+                      product: stream.primaryPinnedProduct!,
+                      onTap: () => _showProductPopup(stream.primaryPinnedProduct!, stream.id),
+                      onBuyNow: () => provider.buyNow(stream.id, stream.primaryPinnedProduct!.id),
+                    ),
+                  ),
                 ),
               ),
 
@@ -261,21 +237,11 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
               ),
             ),
 
-            // Floating "túi đồ live" bag — bottom-left, just below the
-            // product carousel column (which terminates at bottom:120).
-            // Sits at the same horizontal column as the product cards
-            // so the visual relationship "carousel → bag" reads as
-            // "things you've grabbed from this live". Shopee Live uses
-            // the same anchor point. Wrapped in PointerInterceptor so
-            // taps don't fall through to the scrim's IgnorePointer
-            // sibling rendered below it in the Stack.
-            Positioned(
-              left: 12,
-              bottom: 145,
-              child: PointerInterceptor(
-                child: LiveMiniCartBag(streamId: stream.id),
-              ),
-            ),
+            // NOTE: the "túi đồ live" bag used to live here as a separate
+            // Positioned. It now sits inline with the chat composer in
+            // Layer B (Row[bag, composer]) so it stays at the same
+            // visual level as the input — matches the Shopee Live
+            // "bag + chat row" pattern the user asked for.
 
             // Chat + suggestion chips + input bar at bottom.
             // Gradient scrim from fully transparent at the top to ~70%
@@ -323,19 +289,27 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      LiveChatWidget(comments: stream.comments),
+                      LiveChatWidget(
+                        comments: stream.comments,
+                        // Bumped from default 180 → 200 to lift chat
+                        // closer to the carousel without overrunning
+                        // the host's face (260 was too tall — voucher
+                        // banner ended up overlapping the carousel).
+                        maxHeight: 200,
+                      ),
                       // Reserve the same vertical footprint the
-                      // interactive layer (chips + composer) occupies
+                      // interactive layer (chips + bag-row) occupies
                       // so the gradient extends behind them visually.
-                      // Heights mirror Layer B: chips row 32, composer
-                      // 44, plus the gaps used there (4 + 6) and the
-                      // bottom padding (8).
+                      // Heights mirror Layer B: chips row 32, bag-row
+                      // 56 (bag is the tallest child — composer 44 sits
+                      // centered inside it), plus the gaps used there
+                      // (4 + 6) and the bottom padding (8).
                       SizedBox(
                         height: (provider.aiSuggestions.isNotEmpty
                                 ? (4.0 + 32.0)
                                 : 0.0) +
                             6.0 +
-                            44.0 +
+                            56.0 +
                             8.0,
                       ),
                     ],
@@ -344,10 +318,56 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
               ),
             ),
 
-            // Layer B — interactive chips + composer. Sits at higher
-            // z than the scrim so taps land here; PointerInterceptor
-            // routes the click through the HTML <video> stacking
-            // context on Flutter web.
+            // Pinned product carousel — horizontal row anchored to the
+            // TOP-left, just under the shop bar (or under the pinned
+            // spotlight when one is set). Bottom-anchoring overlapped
+            // the chat scrim and made messages collide with the cards,
+            // so we pin to the top instead — same Shopee Live affordance
+            // but out of the chat's vertical lane. Width is capped by
+            // `right: 60` so it doesn't run under the right-side actions
+            // column; height fits the compact card (image 68 + name 2
+            // lines + price + button + paddings).
+            if (stream.products.isNotEmpty)
+              Positioned(
+                left: 8,
+                right: 60,
+                top: stream.primaryPinnedProduct != null ? 120 : 70,
+                height: 165,
+                child: PointerInterceptor(
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    padding: EdgeInsets.zero,
+                    itemCount: stream.products.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 6),
+                    itemBuilder: (_, i) {
+                      final p = stream.products[i];
+                      // Align wrapper: horizontal ListView stretches items
+                      // to fill cross-axis (165px) by default, which left
+                      // an empty white tail under each card. Aligning to
+                      // topCenter pins the card to natural intrinsic
+                      // height and leaves the rest transparent.
+                      return Align(
+                        alignment: Alignment.topCenter,
+                        child: LiveProductCardWidget(
+                          product: p,
+                          streamId: stream.id,
+                          onTap: () => _showProductPopup(p, stream.id),
+                          onBuyNow: () => provider.buyNow(stream.id, p.id),
+                          onAddToCart: () => _addToCart(p),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+
+            // Layer B — interactive chips + bag + composer. Sits at
+            // higher z than the scrim so taps land here;
+            // PointerInterceptor routes the click through the HTML
+            // <video> stacking context on Flutter web. The bag shares
+            // the composer's row so both anchor to the same baseline at
+            // bottom: 8 (CrossAxisAlignment.end), which is what the
+            // user asked for ("dời bag xuống ngang chỗ type chat").
             Positioned(
               left: 12,
               right: 12,
@@ -366,8 +386,17 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
                     const SizedBox(height: 6),
                   ],
                   PointerInterceptor(
-                    child: _ChatComposer(
-                      onSubmit: (text) => provider.sendComment(stream.id, text),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        LiveMiniCartBag(streamId: stream.id),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _ChatComposer(
+                            onSubmit: (text) => provider.sendComment(stream.id, text),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -388,16 +417,16 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
                 // width of a desktop browser. On mobile the screen is
                 // narrower than 360 so this is a no-op there.
                 // Banner sits ABOVE the chat composer + suggestion
-                // chips. Chat scrim takes ~chat(180) + chips(32) +
-                // composer(44) + padding ≈ 290px from bottom, so anchor
-                // the banner at bottom:300 to clear it. If we don't,
+                // chips. Chat scrim takes ~chat(200) + chips(32) +
+                // bag-row(56) + padding ≈ 330px from bottom, so anchor
+                // the banner at bottom:350 to clear it. If we don't,
                 // the 360×~80 banner rect overlaps the chips/composer
                 // and — because Stack hit-tests last-child-first — the
                 // banner (even mid-dismiss with opacity≈0) eats taps,
                 // making the input and chips look broken.
                 return Positioned(
                   left: 12,
-                  bottom: 300,
+                  bottom: 350,
                   width: 360,
                   child: LiveFloatingVoucherWidget(
                     voucher: v,
@@ -902,26 +931,26 @@ class _PinnedSpotlightState extends State<_PinnedSpotlight>
     return GestureDetector(
       onTap: widget.onTap,
       child: Container(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(5),
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.55),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFFF4D4F), width: 1.5),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFFFF4D4F), width: 1),
         ),
         child: Row(
           children: [
             ClipRRect(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(5),
               child: Image.network(
                 p.imageUrl,
-                width: 56, height: 56, fit: BoxFit.cover,
+                width: 32, height: 32, fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => Container(
-                  width: 56, height: 56, color: Colors.white12,
-                  child: const Icon(Icons.image_not_supported, size: 20, color: Colors.white54),
+                  width: 32, height: 32, color: Colors.white12,
+                  child: const Icon(Icons.image_not_supported, size: 14, color: Colors.white54),
                 ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 6),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -930,56 +959,55 @@ class _PinnedSpotlightState extends State<_PinnedSpotlight>
                   FadeTransition(
                     opacity: Tween<double>(begin: 0.55, end: 1.0).animate(_pulse),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                       decoration: BoxDecoration(
                         color: const Color(0xFFFF4D4F),
-                        borderRadius: BorderRadius.circular(4),
+                        borderRadius: BorderRadius.circular(3),
                       ),
                       child: const Text(
                         'ĐANG GIỚI THIỆU',
                         style: TextStyle(
                           color: Colors.white,
-                          fontSize: 9,
+                          fontSize: 7,
                           fontWeight: FontWeight.w800,
-                          letterSpacing: 0.4,
+                          letterSpacing: 0.2,
                         ),
                       ),
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 1),
                   Text(
                     p.name,
                     maxLines: 1, overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13,
+                      color: Colors.white, fontWeight: FontWeight.w600, fontSize: 10,
                     ),
                   ),
-                  const SizedBox(height: 2),
                   Text(
                     '${p.salePrice.toInt()}đ',
                     style: const TextStyle(
                       color: Color(0xFFFFD54F),
                       fontWeight: FontWeight.w700,
-                      fontSize: 13,
+                      fontSize: 10,
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 4),
             ElevatedButton(
               onPressed: widget.onBuyNow,
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFFF4D4F),
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 minimumSize: const Size(0, 0),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
               child: const Text(
                 'Mua',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700),
               ),
             ),
           ],

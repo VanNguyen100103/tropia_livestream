@@ -111,7 +111,15 @@ func BuildChatASS(chats []live.ChatMessage, sessionStart time.Time, videoDuratio
 				continue
 			}
 
-			marginV := 180 + pos*lineHeight // base 180px above bottom
+			// Base 500px above bottom. Earlier values (180, then 320)
+			// still tucked the lowest chat line right against the
+			// browser MP4 player's controls bar (timestamp + play
+			// button render on top of the video, and on a vertical
+			// 1080×1920 source 320 only ≈17% from bottom — not enough
+			// margin when the controls overlay appears). 500 sits the
+			// bottom of the stack at ≈26% from the bottom — clear of
+			// the controls without crowding the host's face.
+			marginV := 500 + pos*lineHeight
 			writeChatDialogue(&b, segStart, segEnd, marginV, m)
 
 			// If there's no chat after this one, our line stays at
@@ -145,6 +153,26 @@ func writeChatDialogue(b *strings.Builder, startMs, endMs int64, marginV int, m 
 	// into the dialogue format.
 	user := sanitizeASS(m.Username)
 	msg := sanitizeASS(m.Message)
+
+	// Truncate long lines: ASS `WrapStyle=2` (set in BuildChatASS) means
+	// long text doesn't auto-wrap, it just clips at the frame boundary.
+	// On a 1080-wide source with font ≈32 and MarginL/R=40, ~60 visible
+	// chars fit before the line runs off the right edge. Cap user + ": " +
+	// msg at 60 chars and append an ellipsis so the chat stays inside
+	// the video frame. (Switching to wrapping would risk wrapped lines
+	// overlapping the chat row above them — truncation is simpler.)
+	const maxVisible = 60
+	userR := []rune(user)
+	msgR := []rune(msg)
+	if len(userR)+2+len(msgR) > maxVisible {
+		avail := maxVisible - len(userR) - 2 - 1 // -1 for the ellipsis
+		if avail < 5 {
+			avail = 5
+		}
+		if len(msgR) > avail {
+			msg = string(msgR[:avail]) + "…"
+		}
+	}
 
 	// Inline color override for the username via {\1c&HBGR&}, then reset
 	// to style default for the message body.

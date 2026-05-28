@@ -232,8 +232,12 @@ func rebuildWithVOut(lastLabel, graph string) string {
 func overlayExpr(typ string) (string, string) {
 	switch typ {
 	case "pin":
-		// Bottom-left, leave room above for chat subtitles (~360px).
-		return "24", "H-h-360"
+		// Top-center spotlight, mirrors the Flutter _PinnedSpotlight
+		// (live_stream_screen.dart) which floats below the shop bar.
+		// Previously rendered bottom-left (H-h-360) which collided with
+		// the chat band and felt buried; viewers should see "ĐANG GHIM"
+		// front and center.
+		return "(W-w)/2", "80"
 	case "coupon":
 		// Top-right, below the LIVE badge area (~96px down).
 		return "W-w-24", "96"
@@ -241,10 +245,9 @@ func overlayExpr(typ string) (string, string) {
 		// Top-right corner, above the coupon banner.
 		return "W-w-24", "32"
 	case "products":
-		// Left side, mid-upper area. Above the pin banner (which is at
-		// H-h-360) so they don't overlap, below the top status bar.
-		// `h` here is the product list PNG height (varies with # of
-		// products) — h_off positions the bottom edge at 60% of frame.
+		// Left side, below the top-center pin banner so the two don't
+		// fight for the same vertical band. `h` here is the product
+		// list PNG height (varies with # of products).
 		return "24", "H*0.30"
 	}
 	return "24", "24"
