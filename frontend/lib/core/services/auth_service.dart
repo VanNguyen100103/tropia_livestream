@@ -59,7 +59,58 @@ class AuthService extends ChangeNotifier {
   AuthService._();
   static final instance = AuthService._();
 
-  final _dio = Dio(BaseOptions(baseUrl: AppConfig.backendUrl));
+  final _dio = _buildDio();
+
+  /// Builds a Dio instance with the standard-envelope unwrap interceptor
+  /// (see [_envelopeInterceptor]). Used for the unauthenticated endpoints
+  /// (login / register / refresh / OAuth exchange).
+  static Dio _buildDio() {
+    final d = Dio(BaseOptions(baseUrl: AppConfig.backendUrl));
+    d.interceptors.add(_envelopeInterceptor());
+    return d;
+  }
+
+  /// Every backend JSON response is wrapped in the standard envelope
+  /// (LIVESTREAM_API.md §1):
+  ///   { Result, StatusCode, StatusMess, status, message, data }
+  /// This interceptor unwraps successful responses so callers keep reading
+  /// `response.data` as the inner payload, and turns `Result == false`
+  /// bodies into a DioException carrying the Vietnamese `message` so the
+  /// existing try/catch + SnackBar code paths surface it unchanged.
+  static Interceptor _envelopeInterceptor() {
+    return InterceptorsWrapper(
+      onResponse: (response, handler) {
+        final body = response.data;
+        if (body is Map && body.containsKey('Result') && body.containsKey('data')) {
+          if (body['Result'] == false) {
+            handler.reject(DioException(
+              requestOptions: response.requestOptions,
+              response: response,
+              type: DioExceptionType.badResponse,
+              error: body['message'] ?? body['StatusMess'] ?? 'Đã có lỗi xảy ra',
+            ));
+            return;
+          }
+          response.data = body['data'];
+        }
+        handler.next(response);
+      },
+    );
+  }
+
+  /// Pulls the human-readable message out of a DioException whose response
+  /// is an error envelope. Falls back to the exception's own message.
+  static String errorMessage(Object e) {
+    if (e is DioException) {
+      final data = e.response?.data;
+      if (data is Map) {
+        final m = data['message'] ?? data['StatusMess'] ?? data['error'];
+        if (m is String && m.isNotEmpty) return m;
+      }
+      if (e.error is String && (e.error as String).isNotEmpty) return e.error as String;
+    }
+    return 'Đã có lỗi xảy ra, vui lòng thử lại';
+  }
 
   AuthUser? _user;
   String?   _accessToken;
@@ -358,6 +409,10 @@ class AuthService extends ChangeNotifier {
 
   Dio _authorizedDio() {
     final d = Dio(BaseOptions(baseUrl: AppConfig.backendUrl));
+
+    // Unwrap the standard envelope first so downstream `onResponse` and
+    // callers see the inner payload.
+    d.interceptors.add(_envelopeInterceptor());
 
     d.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {

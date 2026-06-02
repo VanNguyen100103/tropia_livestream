@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -161,6 +162,15 @@ func (h *Handler) onPublish(c *gin.Context) {
 		deny(c, 1)
 		return
 	}
+	// Validate the publish token embedded in the RTMP URL (?token=…).
+	// LIVESTREAM_API.md: live/start hands the host a single-use token that
+	// SRS must present here; a forged push without it is rejected.
+	token := publishTokenFromParam(p.Param)
+	if !h.repo.ValidatePublishToken(ctx, p.Stream, token) {
+		slog.Default().Warn("srs: publish token invalid/expired — rejecting", "stream", p.Stream, "ip", p.IP)
+		deny(c, 1)
+		return
+	}
 	// Duplicate-publisher gate (threat 1). The first publisher claims a
 	// Redis key keyed by stream_key, valued with their SRS client_id; if
 	// a second client_id later tries to claim the same key while the
@@ -184,8 +194,22 @@ func (h *Handler) onPublish(c *gin.Context) {
 			_ = rds.Expire(ctx, key, publisherLockTTL).Err()
 		}
 	}
-	_ = h.repo.MarkLive(ctx, p.Stream)
+	_ = h.repo.MarkLiveSpec(ctx, p.Stream)
 	ok(c)
+}
+
+// publishTokenFromParam extracts the `token` query value from the SRS
+// `param` field (e.g. "?token=abc&foo=bar"). Returns "" when absent.
+func publishTokenFromParam(param string) string {
+	param = strings.TrimPrefix(param, "?")
+	if param == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(param)
+	if err != nil {
+		return ""
+	}
+	return values.Get("token")
 }
 
 func (h *Handler) onUnpublish(c *gin.Context) {
@@ -209,7 +233,7 @@ func (h *Handler) onUnpublish(c *gin.Context) {
 			slog.Default().Warn("srs: publisher lock lookup failed", "err", err)
 		}
 	}
-	_ = h.repo.EndByChannel(ctx, p.Stream)
+	_ = h.repo.EndByChannelSpec(ctx, p.Stream)
 	ok(c)
 }
 

@@ -97,6 +97,39 @@ func (s *Service) BuildPublishURLs(stream *Stream) PublishURLs {
 	}
 }
 
+// SpecURLs holds the publish/playback URLs in the shape LIVESTREAM_API.md
+// expects: a ready-to-use RTMP URL with the publish token embedded, the
+// token-less RTMP base (for OBS/Larix split config), and the direct SRS
+// HLS playback URL.
+type SpecURLs struct {
+	RTMPURL  string `json:"rtmp_url"`
+	RTMPBase string `json:"rtmp_base"`
+	HLSURL   string `json:"hls_url"`
+}
+
+// SpecPublishURLs builds the host-facing URLs for a freshly created
+// session. `token` may be empty (e.g. after the publish token is revoked),
+// in which case rtmp_url omits the ?token= suffix.
+func (s *Service) SpecPublishURLs(streamKey, token string) SpecURLs {
+	base := s.rtmpHost + "/live"
+	rtmp := base + "/" + streamKey
+	if token != "" {
+		rtmp += "?token=" + token
+	}
+	return SpecURLs{
+		RTMPURL:  rtmp,
+		RTMPBase: base,
+		HLSURL:   s.SpecHLSURL(streamKey),
+	}
+}
+
+// SpecHLSURL is the direct SRS HLS playback URL for a stream key
+// (http://host:8080/live/{key}.m3u8). The viewer plays this once the
+// session is live.
+func (s *Service) SpecHLSURL(streamKey string) string {
+	return s.hlsHost + "/live/" + streamKey + ".m3u8"
+}
+
 func generateStreamKey() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

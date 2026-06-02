@@ -163,6 +163,10 @@ func main() {
 	router.Use(httpx.RequestID())
 	router.Use(httpx.SecurityHeaders())
 	router.Use(httpx.AuditLog(logger))
+	// Wrap every JSON response in the standard envelope (LIVESTREAM_API.md
+	// §1). Registered before ErrorHandler so its buffering writer captures
+	// both handler output and error responses.
+	router.Use(httpx.EnvelopeWrapper())
 	router.Use(httpx.ErrorHandler(logger))
 	router.Use(httpx.RequestSizeGuard(64, "/api/upload"))
 	// CORS — whitelist per-environment via CORS_ORIGIN. We refuse to boot
@@ -292,11 +296,10 @@ func main() {
 		WithStreamKeyProvider(streamKeyProvider).
 		WithAudit(auditRepo).
 		WithMuteRepo(muteRepo)
-	liveH.Register(router.Group("/api/live"), authMw, sellerMw)
-
-	// AI endpoints (DeepSeek-backed) on top of live sessions
-	aiH := live.NewAIHandler(deepseek, sessRepo).WithCoupons(cpnRepo)
-	aiH.Register(router.Group("/api/live"), authMw, sellerMw)
+	// LIVESTREAM_API.md endpoint surface: live/start, live/stop, live/my,
+	// live/list, live/watch, live/chat/*, live/gifts*, live/gift/send.
+	// Replaces the legacy /streams routes (full refactor to the spec).
+	liveH.RegisterSpec(router.Group("/api/live"), authMw)
 
 	// SRS webhooks
 	srsH := srs.NewHandler(sessRepo).
