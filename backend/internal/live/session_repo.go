@@ -253,6 +253,90 @@ func (r *SessionRepository) EndByChannel(ctx context.Context, channel string) er
 	return err
 }
 
+// EndStaleSessions force-ends any ready/live session whose started_at is
+// older than maxAge — the platform's max live-duration cap. Sets
+// status='offline', stamps ended_at, and revokes the publish token so a
+// reconnecting encoder can't resurrect it. Returns the stream_keys ended
+// (for logging / stats push). Run periodically by the worker.
+func (r *SessionRepository) EndStaleSessions(ctx context.Context, maxAge time.Duration) ([]string, error) {
+	cutoff := time.Now().Add(-maxAge)
+	rows, err := r.pool.Query(ctx,
+		`UPDATE live_sessions
+		    SET status = 'offline', ended_at = NOW(), publish_token = NULL
+		  WHERE status IN ('ready', 'live') AND started_at < $1
+		  RETURNING stream_key`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// ExpiredRecording is a recording past its R2 retention window, returned by
+// ExpiredRecordings for the retention sweeper to delete from R2.
+type ExpiredRecording struct {
+	ID        uuid.UUID
+	SessionID uuid.UUID
+	R2Key     string
+}
+
+// ExpiredRecordings lists uploaded recordings older than olderThan whose R2
+// object should be deleted (VOD retention = 30 days by default).
+func (r *SessionRepository) ExpiredRecordings(ctx context.Context, olderThan time.Duration, limit int) ([]ExpiredRecording, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	cutoff := time.Now().Add(-olderThan)
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, session_id, r2_key
+		   FROM recordings
+		  WHERE status = 'uploaded' AND r2_key IS NOT NULL
+		    AND COALESCE(completed_at, created_at) < $1
+		  ORDER BY COALESCE(completed_at, created_at)
+		  LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ExpiredRecording, 0)
+	for rows.Next() {
+		var e ExpiredRecording
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.R2Key); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// MarkRecordingExpired flags a recording 'expired' + clears its r2_key after
+// the R2 object is deleted, and nulls the session's VOD URLs so the app
+// stops surfacing a dead playback link.
+func (r *SessionRepository) MarkRecordingExpired(ctx context.Context, recID, sessionID uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`UPDATE recordings SET status = 'expired', r2_key = NULL WHERE id = $1`, recID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE live_sessions SET vod_mp4_url = NULL, vod_hls_url = NULL WHERE id = $1`, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // SetVodURLs records the public URLs of the uploaded VOD after worker
 // finishes FFmpeg remux + R2 upload.
 func (r *SessionRepository) SetVodURLs(ctx context.Context, sessionID uuid.UUID, mp4URL, hlsURL string) error {

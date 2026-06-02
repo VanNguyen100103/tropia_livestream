@@ -26,6 +26,7 @@ import 'package:tropia/features/live/screens/seller_product_picker_screen.dart';
 import 'package:tropia/features/live/widgets/face_sticker_overlay.dart';
 import 'package:tropia/features/live/services/live_foreground_service.dart';
 import 'package:tropia/features/live/widgets/live_chat_widget.dart';
+import 'package:tropia/features/live/widgets/live_gift_overlay.dart';
 
 const _tag = 'LiveSetupScreen';
 
@@ -68,6 +69,8 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
   bool _isLive = false;
   bool _isStarting = false;
   String? _sessionId;
+  // stream_key của phiên (từ live/start) — dùng cho overlay quà trên host.
+  String? _streamKey;
   // live_session_products.id currently highlighted ("đang giới thiệu").
   // Null = no pin. Synced from server in stats events so a host on two
   // devices stays consistent.
@@ -848,6 +851,11 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
                     },
                   ),
           ),
+          // Gift overlay — host thấy quà người xem tặng (poll gifts/recent).
+          if (_isLive && _streamKey != null)
+            Positioned.fill(
+              child: LiveGiftOverlay(streamKey: _streamKey),
+            ),
           // Right-side toolbar
           Positioned(
             right: AppSizes.sm,
@@ -2034,6 +2042,7 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
     // live/start trả `id` (integer seq) + `session_id` (UUID). Dùng UUID cho
     // các endpoint product / coupon / stats legacy (chúng key theo UUID).
     final newSessionId = res['session_id'] as String?;
+    final newStreamKey = res['stream_key'] as String?;
     final rtmp = (res['rtmp_url'] as String?) ?? '';
     if (newSessionId == null || rtmp.isEmpty) {
       if (!mounted) return;
@@ -2143,6 +2152,7 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
       setState(() {
         _aliveController = ctrl;
         _sessionId = sid;
+        _streamKey = newStreamKey;
         _isLive = true;
         _isStarting = false;
         _rtmpServer = server;

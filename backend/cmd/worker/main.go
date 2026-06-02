@@ -150,7 +150,27 @@ func main() {
 		runDVRSweeper(ctx, dvrRoot, 30*time.Minute, 2*time.Hour, logger)
 	}()
 
-	logger.Info("worker running", "subscriptions", len(subs))
+	// Max live-duration cap — force-end sessions running longer than
+	// MAX_LIVE_DURATION (default 4h) so a forgotten/abandoned stream
+	// doesn't stay "live" forever.
+	maxLiveDuration := parseDurEnv("MAX_LIVE_DURATION", 4*time.Hour)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runLiveDurationSweeper(ctx, sessRepo, 5*time.Minute, maxLiveDuration, logger)
+	}()
+
+	// VOD retention — delete recordings from R2 after RECORDING_RETENTION
+	// (default 720h = 30 days), then mark the row 'expired'.
+	recRetention := parseDurEnv("RECORDING_RETENTION", 30*24*time.Hour)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runR2RetentionSweeper(ctx, sessRepo, r2, 6*time.Hour, recRetention, logger)
+	}()
+
+	logger.Info("worker running", "subscriptions", len(subs),
+		"max_live_duration", maxLiveDuration, "recording_retention", recRetention)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -615,4 +635,90 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// parseDurEnv reads a time.Duration from env (e.g. "4h", "720h"), falling
+// back to def when unset/invalid.
+func parseDurEnv(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// ── Live max-duration sweeper ───────────────────────────────────────────────
+
+// runLiveDurationSweeper force-ends sessions live longer than maxDuration —
+// the platform's max live-time cap. Runs every `interval`.
+func runLiveDurationSweeper(ctx context.Context, repo *live.SessionRepository, interval, maxDuration time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	sweepLiveDuration(ctx, repo, maxDuration, log)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweepLiveDuration(ctx, repo, maxDuration, log)
+		}
+	}
+}
+
+func sweepLiveDuration(ctx context.Context, repo *live.SessionRepository, maxDuration time.Duration, log *slog.Logger) {
+	keys, err := repo.EndStaleSessions(ctx, maxDuration)
+	if err != nil {
+		log.Warn("live duration sweep: failed", "err", err)
+		return
+	}
+	if len(keys) > 0 {
+		log.Info("live duration sweep: ended over-long sessions",
+			"count", len(keys), "max_duration", maxDuration, "stream_keys", keys)
+	}
+}
+
+// ── R2 VOD retention sweeper ─────────────────────────────────────────────────
+
+// runR2RetentionSweeper deletes recordings older than maxAge from Cloudflare
+// R2 (VOD kept 30 days by default, then removed). Runs every `interval`.
+func runR2RetentionSweeper(ctx context.Context, repo *live.SessionRepository, r2 *storage.R2, interval, maxAge time.Duration, log *slog.Logger) {
+	if r2 == nil {
+		log.Info("r2 retention sweeper disabled (R2 not configured)")
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	sweepR2Retention(ctx, repo, r2, maxAge, log)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweepR2Retention(ctx, repo, r2, maxAge, log)
+		}
+	}
+}
+
+func sweepR2Retention(ctx context.Context, repo *live.SessionRepository, r2 *storage.R2, maxAge time.Duration, log *slog.Logger) {
+	recs, err := repo.ExpiredRecordings(ctx, maxAge, 200)
+	if err != nil {
+		log.Warn("r2 retention sweep: list failed", "err", err)
+		return
+	}
+	var deleted int
+	for _, rec := range recs {
+		if err := r2.Delete(ctx, rec.R2Key); err != nil {
+			log.Warn("r2 retention: delete failed", "key", rec.R2Key, "err", err)
+			continue
+		}
+		if err := repo.MarkRecordingExpired(ctx, rec.ID, rec.SessionID); err != nil {
+			log.Warn("r2 retention: mark expired failed", "recording", rec.ID, "err", err)
+			continue
+		}
+		deleted++
+	}
+	if deleted > 0 {
+		log.Info("r2 retention sweep: deleted expired recordings", "deleted", deleted, "older_than", maxAge)
+	}
 }
