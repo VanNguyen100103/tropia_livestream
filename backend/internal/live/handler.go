@@ -599,7 +599,9 @@ func (h *Handler) listActive(c *gin.Context) {
 		out := make([]sessionWithPreview, len(sessions))
 		for i, s := range sessions {
 			urls := h.svc.BuildPlaybackURLs(&Stream{ID: s.ID, StreamKey: s.StreamKey})
-			s.StreamKey = ""
+			// stream_key is public in the spec (viewers address chat/gift by
+			// it). Publish is still protected by the publish_token validated
+			// at SRS on_publish, so exposing the playback key is safe.
 			out[i] = sessionWithPreview{
 				Session:     s,
 				PlaybackHLS: urls.HLS,
@@ -669,8 +671,6 @@ func (h *Handler) getOne(c *gin.Context) {
 		c.Error(httpx.NewNotFound("session not found"))
 		return
 	}
-	// Hide stream key
-	sess.StreamKey = ""
 	c.JSON(http.StatusOK, gin.H{"session": sess})
 }
 
@@ -686,7 +686,6 @@ func (h *Handler) getPlayback(c *gin.Context) {
 		return
 	}
 	playback := h.svc.BuildPlaybackURLs(&Stream{ID: sess.ID, StreamKey: sess.StreamKey})
-	sess.StreamKey = ""
 	c.JSON(http.StatusOK, gin.H{"session": sess, "playback": playback})
 }
 

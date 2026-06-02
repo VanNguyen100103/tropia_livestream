@@ -367,6 +367,59 @@ class LiveRepository {
     );
   }
 
+  // ── Gifts (LIVESTREAM_API.md §8) ────────────────────────────────────────────
+
+  /// Danh mục quà (GET /api/live/gifts). Public.
+  Future<List<LiveGiftCatalogItem>> fetchGiftCatalog() async {
+    try {
+      final res = await _dio.get('/api/live/gifts');
+      final list = (res.data as Map<String, dynamic>)['items'] as List?;
+      return (list ?? const [])
+          .cast<Map<String, dynamic>>()
+          .map(LiveGiftCatalogItem.fromJson)
+          .toList();
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchGiftCatalog failed', e, null);
+      return const [];
+    }
+  }
+
+  /// Gửi quà (POST /api/live/gift/send). Trả về `{gift, points_remaining}`.
+  /// Ném DioException (kèm message tiếng Việt) khi thiếu điểm / không live /
+  /// tự tặng — caller bắt và hiển thị.
+  Future<({LiveGiftSent gift, int pointsRemaining})> sendGift({
+    required String streamKey,
+    required int giftId,
+    int quantity = 1,
+  }) async {
+    final res = await _dio.post('/api/live/gift/send', data: {
+      'stream_key': streamKey,
+      'gift_id':    giftId,
+      'quantity':   quantity,
+    });
+    final data = res.data as Map<String, dynamic>;
+    return (
+      gift: LiveGiftSent.fromJson(data['gift'] as Map<String, dynamic>),
+      pointsRemaining: (data['points_remaining'] as num? ?? 0).toInt(),
+    );
+  }
+
+  /// Quà vừa tặng trên stream (GET /api/live/gifts/recent) — overlay hiệu ứng.
+  Future<List<LiveGiftSent>> fetchRecentGifts(String streamKey, {int limit = 30}) async {
+    try {
+      final res = await _dio.get('/api/live/gifts/recent',
+          queryParameters: {'stream_key': streamKey, 'limit': limit});
+      final list = (res.data as Map<String, dynamic>)['items'] as List?;
+      return (list ?? const [])
+          .cast<Map<String, dynamic>>()
+          .map(LiveGiftSent.fromJson)
+          .toList();
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchRecentGifts failed', e, null);
+      return const [];
+    }
+  }
+
   // ── VOD replay timeline ────────────────────────────────────────────────────
 
   /// Fetches the merged replay timeline for a recorded session: every

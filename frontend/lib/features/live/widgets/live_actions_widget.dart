@@ -32,6 +32,8 @@ class LiveActionsWidget extends StatefulWidget {
   final VoidCallback onShare;
   final VoidCallback onCommentTap;
   final VoidCallback onFollowTap;
+  // Tặng quà (Shopee Live). Null → ẩn nút (ví dụ host xem chính mình).
+  final VoidCallback? onGiftTap;
 
   const LiveActionsWidget({
     super.key,
@@ -40,6 +42,7 @@ class LiveActionsWidget extends StatefulWidget {
     required this.onShare,
     required this.onCommentTap,
     required this.onFollowTap,
+    this.onGiftTap,
   });
 
   @override
@@ -142,6 +145,12 @@ class _LiveActionsWidgetState extends State<LiveActionsWidget>
               _buildCommentButton(),
               const SizedBox(height: AppSizes.md),
 
+              // ── Gift button (Shopee Live) ───────────────────────────────
+              if (widget.onGiftTap != null) ...[
+                _buildGiftButton(),
+                const SizedBox(height: AppSizes.md),
+              ],
+
               // ── Share button ────────────────────────────────────────────
               _buildShareButton(),
             ],
@@ -232,6 +241,31 @@ class _LiveActionsWidgetState extends State<LiveActionsWidget>
           Text(
             widget.stream.likeCountFormatted,
             style: const TextStyle(
+              color: Colors.white,
+              fontSize: AppSizes.fontXs,
+              fontWeight: FontWeight.w600,
+              shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Gift button (mở bottom sheet chọn quà)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  Widget _buildGiftButton() {
+    return _ActionButton(
+      onTap: widget.onGiftTap!,
+      child: const Column(
+        children: [
+          Icon(Icons.card_giftcard, color: Colors.white, size: AppSizes.iconMd),
+          SizedBox(height: 2),
+          Text(
+            'Quà',
+            style: TextStyle(
               color: Colors.white,
               fontSize: AppSizes.fontXs,
               fontWeight: FontWeight.w600,

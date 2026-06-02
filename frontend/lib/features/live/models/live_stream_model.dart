@@ -651,6 +651,10 @@ class LiveStream {
   /// ID duy nhất của buổi live
   final String id;
 
+  /// SRS stream key (user_{id}_{ts}). Dùng để gọi các API theo spec
+  /// (chat/history, gift/send, gifts/recent). Null khi backend chưa trả về.
+  final String? streamKey;
+
   /// ID của cửa hàng / streamer
   final String sellerId;
 
@@ -722,6 +726,7 @@ class LiveStream {
 
   const LiveStream({
     required this.id,
+    this.streamKey,
     required this.sellerId,
     required this.sellerName,
     required this.sellerAvatarUrl,
@@ -756,6 +761,7 @@ class LiveStream {
 
   LiveStream copyWith({
     String? id,
+    String? streamKey,
     String? sellerId,
     String? sellerName,
     String? sellerAvatarUrl,
@@ -782,6 +788,7 @@ class LiveStream {
   }) {
     return LiveStream(
       id: id ?? this.id,
+      streamKey: streamKey ?? this.streamKey,
       sellerId: sellerId ?? this.sellerId,
       sellerName: sellerName ?? this.sellerName,
       sellerAvatarUrl: sellerAvatarUrl ?? this.sellerAvatarUrl,
@@ -863,4 +870,105 @@ class PlaybackURLs {
         flv:  json['flv']  as String? ?? '',
         whep: json['whep'] as String? ?? '',
       );
+}
+
+// ─── Gift (LIVESTREAM_API.md §8) ─────────────────────────────────────────────
+
+/// Một loại quà trong danh mục (GET /api/live/gifts).
+class LiveGiftCatalogItem {
+  final int id;
+  final String code;
+  final String name;
+  final String? iconUrl;
+  final int pointCost;
+  final int displayValue;
+
+  const LiveGiftCatalogItem({
+    required this.id,
+    required this.code,
+    required this.name,
+    this.iconUrl,
+    required this.pointCost,
+    required this.displayValue,
+  });
+
+  factory LiveGiftCatalogItem.fromJson(Map<String, dynamic> json) =>
+      LiveGiftCatalogItem(
+        id:           (json['id'] as num).toInt(),
+        code:         json['code'] as String? ?? '',
+        name:         json['name'] as String? ?? '',
+        iconUrl:      json['icon_url'] as String?,
+        pointCost:    (json['point_cost'] as num? ?? 0).toInt(),
+        displayValue: (json['display_value'] as num? ?? 0).toInt(),
+      );
+
+  /// Emoji fallback khi catalog chưa có icon_url (UI vẫn đẹp ở local).
+  String get emoji {
+    switch (code) {
+      case 'rose':   return '🌹';
+      case 'heart':  return '❤️';
+      case 'star':   return '⭐';
+      case 'rocket': return '🚀';
+      case 'crown':  return '👑';
+      default:       return '🎁';
+    }
+  }
+}
+
+/// Một lượt tặng quà đã diễn ra (gift/send response + gifts/recent items).
+class LiveGiftSent {
+  final int id;
+  final int senderUserId;
+  final String senderName;
+  final String senderAvatar;
+  final int giftId;
+  final String giftCode;
+  final String giftName;
+  final String? giftIconUrl;
+  final int quantity;
+  final int totalPoints;
+  final int displayValue;
+  final DateTime createdAt;
+
+  const LiveGiftSent({
+    required this.id,
+    required this.senderUserId,
+    required this.senderName,
+    required this.senderAvatar,
+    required this.giftId,
+    required this.giftCode,
+    required this.giftName,
+    this.giftIconUrl,
+    required this.quantity,
+    required this.totalPoints,
+    required this.displayValue,
+    required this.createdAt,
+  });
+
+  factory LiveGiftSent.fromJson(Map<String, dynamic> json) => LiveGiftSent(
+        id:           (json['id'] as num? ?? 0).toInt(),
+        senderUserId: (json['sender_user_id'] as num? ?? 0).toInt(),
+        senderName:   json['sender_name'] as String? ?? '',
+        senderAvatar: json['sender_avatar'] as String? ?? '',
+        giftId:       (json['gift_id'] as num? ?? 0).toInt(),
+        giftCode:     json['gift_code'] as String? ?? '',
+        giftName:     json['gift_name'] as String? ?? '',
+        giftIconUrl:  json['gift_icon_url'] as String?,
+        quantity:     (json['quantity'] as num? ?? 1).toInt(),
+        totalPoints:  (json['total_points'] as num? ?? 0).toInt(),
+        displayValue: (json['display_value'] as num? ?? 0).toInt(),
+        createdAt:    DateTime.tryParse(json['created_at']?.toString() ?? '') ??
+                          DateTime.now(),
+      );
+
+  String get emoji {
+    switch (giftCode) {
+      case 'rose':   return '🌹';
+      case 'heart':  return '❤️';
+      case 'star':   return '⭐';
+      case 'rocket': return '🚀';
+      case 'crown':  return '👑';
+      default:       return '🎁';
+    }
+  }
 }

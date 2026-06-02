@@ -298,8 +298,16 @@ func main() {
 		WithMuteRepo(muteRepo)
 	// LIVESTREAM_API.md endpoint surface: live/start, live/stop, live/my,
 	// live/list, live/watch, live/chat/*, live/gifts*, live/gift/send.
-	// Replaces the legacy /streams routes (full refactor to the spec).
 	liveH.RegisterSpec(router.Group("/api/live"), authMw)
+	// Legacy /streams surface kept registered alongside the spec routes so
+	// the existing Flutter UI (products, coupons, pinned product, stats,
+	// VOD timeline, chat WS) keeps working. No path collisions with the
+	// spec endpoints above.
+	liveH.Register(router.Group("/api/live"), authMw, sellerMw)
+
+	// AI endpoints (DeepSeek-backed) on top of live sessions.
+	aiH := live.NewAIHandler(deepseek, sessRepo).WithCoupons(cpnRepo)
+	aiH.Register(router.Group("/api/live"), authMw, sellerMw)
 
 	// SRS webhooks
 	srsH := srs.NewHandler(sessRepo).

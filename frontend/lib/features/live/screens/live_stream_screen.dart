@@ -14,6 +14,7 @@ import 'package:tropia/features/live/widgets/hls_viewer.dart';
 import 'package:tropia/features/live/widgets/live_actions_widget.dart';
 import 'package:tropia/features/live/widgets/live_chat_widget.dart';
 import 'package:tropia/features/live/widgets/live_floating_voucher_widget.dart';
+import 'package:tropia/features/live/widgets/live_gift_sheet.dart';
 import 'package:tropia/features/live/widgets/live_mini_cart_bag.dart';
 import 'package:tropia/features/live/widgets/live_product_card_widget.dart';
 import 'package:tropia/features/live/widgets/live_product_popup.dart';
@@ -252,6 +253,11 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
                 onShare: () {},
                 onCommentTap: () {},
                 onFollowTap: () => provider.toggleFollow(stream.id),
+                // Tặng quà: chỉ hiện cho viewer (host tự xem stream mình thì
+                // ẩn — backend cũng chặn tự tặng).
+                onGiftTap: (stream.sellerId == AuthService.instance.currentUserId)
+                    ? null
+                    : () => LiveGiftSheet.show(context, stream.streamKey),
               ),
             ),
 

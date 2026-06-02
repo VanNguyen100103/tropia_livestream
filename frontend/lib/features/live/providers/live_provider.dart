@@ -299,6 +299,7 @@ class LiveProvider extends ChangeNotifier {
     final rawPreviewHls = row['playback_hls'] as String?;
     return LiveStream(
       id:              row['id'] as String,
+      streamKey:       row['stream_key'] as String?,
       sellerId:        row['seller_id'] as String,
       shopId:          row['shop_id'] as String?,
       // Preview HLS URL injected by /streams so list cards can auto-play

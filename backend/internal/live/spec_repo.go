@@ -234,19 +234,26 @@ func (r *SessionRepository) ListLiveSpec(ctx context.Context, limit int) ([]Spec
 	return out, rows.Err()
 }
 
-// ValidatePublishToken reports whether the supplied token matches the
-// session's stored, unexpired publish token. Used by SRS on_publish.
+// ValidatePublishToken reports whether SRS should accept a publish for
+// streamKey. Sessions created via the spec live/start path carry a
+// publish_token and the supplied ?token= must match (unexpired). Legacy
+// sessions created without a token (the old /streams flow) carry no token
+// and are accepted unconditionally — so both the spec and legacy host
+// flows keep working side by side.
 func (r *SessionRepository) ValidatePublishToken(ctx context.Context, streamKey, token string) bool {
-	if token == "" {
-		return false
-	}
 	var stored string
 	var expires *time.Time
 	err := r.pool.QueryRow(ctx,
 		`SELECT COALESCE(publish_token, ''), publish_token_expires_at
-		   FROM live_sessions WHERE stream_key = $1 AND status IN ('ready', 'live')`,
+		   FROM live_sessions WHERE stream_key = $1 AND status NOT IN ('ended')`,
 		streamKey).Scan(&stored, &expires)
-	if err != nil || stored == "" || stored != token {
+	if err != nil {
+		return false
+	}
+	if stored == "" {
+		return true // legacy / unprotected session — no token required
+	}
+	if token == "" || stored != token {
 		return false
 	}
 	if expires != nil && expires.Before(time.Now()) {
