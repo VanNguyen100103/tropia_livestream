@@ -83,7 +83,8 @@ qua, còn lại tra `shop_live_permissions` + bảng `shops`.
 | `POST /api/live/streams/:id/like` | Public (rate-limited) |
 | `POST /api/live/streams/:id/join`, `/leave`, `/chat`, `/track-cart-add`, `/track-follow` | `authMw` |
 | `POST /api/live/streams` (create), `/:id/end`, `GET /:id/publish`, `PATCH /:id/bot`, products CRUD, `/:id/pin`, coupons, `/:id/chat/mute|unmute` | `authMw` + **`liveGate`** + check **chủ phiên** (`session.seller_id == user`) |
-| `POST /api/live/streams/:id/ai-suggestions`, `/ai-reply`, `/analyze` | `authMw` + `sellerMw` ⚠️ (xem mục 5) |
+| `POST /api/live/streams/:id/ai-suggestions`, `/ai-reply` | `authMw` (mọi user đăng nhập) |
+| `POST /api/live/streams/:id/analyze` | `authMw` + **`liveGate`** (chủ shop / thành viên approved / admin) |
 
 ### SRS webhook (chỉ server SRS gọi)
 | Endpoint | Quyền |
@@ -129,10 +130,9 @@ hoặc `{ "status": "rejected" }`. Gỡ hẳn: `DELETE`.
 
 ## 5. Điểm cần lưu ý / TODO
 
-- ⚠️ **AI endpoints** (`/streams/:id/ai-suggestions|ai-reply|analyze`) hiện vẫn
-  dùng `sellerMw` (role seller/admin). Nên một **CTV role=buyer** đã được duyệt
-  live thì **không gọi được** các API AI này. Nếu muốn nhất quán, đổi sang
-  `liveGate` + check chủ phiên.
+- ✅ **AI endpoints**: `ai-suggestions`/`ai-reply` chỉ cần `authMw`;
+  `analyze` đã chuyển sang `liveGate` nên **CTV/nhân viên approved dùng được**
+  (trước đây `sellerMw` chặn CTV role=buyer).
 - `liveGate` áp cho cả nhóm legacy `/streams` quản lý phiên → mỗi request thêm
   1–2 truy vấn DB (shops + shop_live_permissions). Có thể cache nếu cần.
 - Spec gốc LIVESTREAM_API.md để `live/start` mở cho mọi user JWT — Tropia

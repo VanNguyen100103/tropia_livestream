@@ -63,13 +63,16 @@ func (h *AIHandler) activeCouponHints(ctx context.Context, sessionID uuid.UUID) 
 	return out
 }
 
-func (h *AIHandler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc) {
+// Register wires the AI endpoints. `gate` restricts the host-analytics
+// `analyze` endpoint to live-authorized accounts (owner / approved member /
+// admin); suggestions + reply only need authentication.
+func (h *AIHandler) Register(r *gin.RouterGroup, authMw, gate gin.HandlerFunc) {
 	authed := r.Group("/streams/:id", authMw)
 	authed.POST("/ai-suggestions", h.suggestions)
 	authed.POST("/ai-reply", h.reply)
 
-	seller := r.Group("/streams/:id", authMw, sellerMw)
-	seller.POST("/analyze", h.analyze)
+	gated := r.Group("/streams/:id", authMw, gate)
+	gated.POST("/analyze", h.analyze)
 }
 
 // ---------- helpers ----------

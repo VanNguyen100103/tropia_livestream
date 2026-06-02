@@ -323,9 +323,11 @@ func main() {
 	memberH := live.NewMemberHandler(memberRepo)
 	memberH.Register(router.Group("/api/live"), authMw)
 
-	// AI endpoints (DeepSeek-backed) on top of live sessions.
+	// AI endpoints (DeepSeek-backed) on top of live sessions. `analyze`
+	// (host analytics) is gated by the live-permission check so approved
+	// collaborators/staff can use it too — not just the seller role.
 	aiH := live.NewAIHandler(deepseek, sessRepo).WithCoupons(cpnRepo)
-	aiH.Register(router.Group("/api/live"), authMw, sellerMw)
+	aiH.Register(router.Group("/api/live"), authMw, liveGate)
 
 	// SRS webhooks
 	srsH := srs.NewHandler(sessRepo).
