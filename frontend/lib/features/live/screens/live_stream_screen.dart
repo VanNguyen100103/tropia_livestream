@@ -15,6 +15,7 @@ import 'package:tropia/features/live/widgets/live_actions_widget.dart';
 import 'package:tropia/features/live/widgets/live_chat_widget.dart';
 import 'package:tropia/features/live/widgets/live_floating_voucher_widget.dart';
 import 'package:tropia/features/live/widgets/live_gift_sheet.dart';
+import 'package:tropia/features/live/widgets/live_gift_overlay.dart';
 import 'package:tropia/features/live/widgets/live_mini_cart_bag.dart';
 import 'package:tropia/features/live/widgets/live_product_card_widget.dart';
 import 'package:tropia/features/live/widgets/live_product_popup.dart';
@@ -50,6 +51,9 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
 
   late final LiveProvider _provider;
   ViewerUnloadHook? _unloadHook;
+
+  // Điều khiển overlay hiệu ứng quà (banner + emoji bay).
+  final _giftOverlayKey = GlobalKey<LiveGiftOverlayState>();
 
   @override
   void initState() {
@@ -257,7 +261,21 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
                 // ẩn — backend cũng chặn tự tặng).
                 onGiftTap: (stream.sellerId == AuthService.instance.currentUserId)
                     ? null
-                    : () => LiveGiftSheet.show(context, stream.streamKey),
+                    : () => LiveGiftSheet.show(
+                          context,
+                          stream.streamKey,
+                          onSent: (g) => _giftOverlayKey.currentState?.addGift(g),
+                        ),
+              ),
+            ),
+
+            // Gift overlay: banner + emoji bay khi có quà (poll gifts/recent
+            // + phản hồi tức thì khi chính mình tặng). Phủ toàn màn, không
+            // chặn chạm (IgnorePointer bên trong widget).
+            Positioned.fill(
+              child: LiveGiftOverlay(
+                key: _giftOverlayKey,
+                streamKey: stream.streamKey,
               ),
             ),
 

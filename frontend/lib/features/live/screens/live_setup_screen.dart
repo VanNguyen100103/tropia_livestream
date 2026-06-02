@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:tropia/core/constants/app_constants.dart';
+import 'package:tropia/core/services/auth_service.dart';
 import 'package:tropia/core/utils/logger.dart';
 import 'package:tropia/features/live/data/live_repository.dart';
 import 'package:tropia/features/live/data/live_socket.dart';
@@ -2015,26 +2016,26 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
 
     setState(() => _isStarting = true);
 
-    // 2. Create the stream session on the backend (returns RTMP/WHIP/SRT URLs).
+    // 2. Tạo phiên live theo spec (POST /api/live/start) — nhận rtmp_url đã
+    //    kèm ?token=publish_token. SRS on_publish sẽ validate token này.
     Map<String, dynamic> res;
     try {
-      res = await LiveRepository.instance.startLive(
-        title: title,
-        category: _selectedCategory,
-      );
+      res = await LiveRepository.instance.startLiveSpec(title: title);
     } catch (e) {
-      AppLogger.logError(_tag, 'startLive backend failed', e, null);
+      AppLogger.logError(_tag, 'startLiveSpec backend failed', e, null);
       if (!mounted) return;
       setState(() => _isStarting = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Không tạo được stream: $e')),
+        SnackBar(content: Text('Không tạo được stream: ${AuthService.errorMessage(e)}')),
       );
       return;
     }
 
-    final session = res['session'] as Map<String, dynamic>?;
-    final publishJson = res['publish'] as Map<String, dynamic>?;
-    if (session == null || publishJson == null) {
+    // live/start trả `id` (integer seq) + `session_id` (UUID). Dùng UUID cho
+    // các endpoint product / coupon / stats legacy (chúng key theo UUID).
+    final newSessionId = res['session_id'] as String?;
+    final rtmp = (res['rtmp_url'] as String?) ?? '';
+    if (newSessionId == null || rtmp.isEmpty) {
       if (!mounted) return;
       setState(() => _isStarting = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2044,8 +2045,7 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
     }
 
     // 2b. Attach picked products to the session so viewers see them.
-    final newSessionId = session['id'] as String?;
-    if (newSessionId != null && _selectedProducts.isNotEmpty) {
+    if (_selectedProducts.isNotEmpty) {
       try {
         final created = await LiveRepository.instance.addSessionProducts(
           newSessionId,
@@ -2083,16 +2083,6 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
       } catch (e) {
         AppLogger.logError(_tag, 'attach session products failed', e, null);
       }
-    }
-    final publish = PublishURLs.fromJson(publishJson);
-    final rtmp = publish.rtmp;
-    if (rtmp.isEmpty) {
-      if (!mounted) return;
-      setState(() => _isStarting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Server không trả về RTMP URL')),
-      );
-      return;
     }
 
     // 3. Release package:camera so apivideo can claim the camera device.
@@ -2149,7 +2139,7 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
         await LiveForegroundService.stop();
         return;
       }
-      final sid = session['id'] as String?;
+      final sid = newSessionId;
       setState(() {
         _aliveController = ctrl;
         _sessionId = sid;
@@ -2165,27 +2155,25 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
         _statFollows = 0;
       });
       _startLiveTicker();
-      if (sid != null) {
-        // Reuse LiveProvider's chat polling so the host sees viewer
-        // comments in real time (same code path as the buyer side).
-        context.read<LiveProvider>().openStream(sid);
-        _startStatsPolling(sid);
+      // sid (= newSessionId) đã được guard non-null ở trên.
+      // Reuse LiveProvider's chat polling so the host sees viewer
+      // comments in real time (same code path as the buyer side).
+      context.read<LiveProvider>().openStream(sid);
+      _startStatsPolling(sid);
 
-        // Persist any vouchers the host set up in step 1. Fire-and-forget —
-        // if one POST fails (duplicate code, malformed expiry, etc.) we log
-        // it and keep going so the broadcast itself isn't blocked.
-        for (final coupon in _coupons) {
-          unawaited(_persistCoupon(sid, coupon));
-        }
+      // Persist any vouchers the host set up in step 1. Fire-and-forget —
+      // if one POST fails (duplicate code, malformed expiry, etc.) we log
+      // it and keep going so the broadcast itself isn't blocked.
+      for (final coupon in _coupons) {
+        unawaited(_persistCoupon(sid, coupon));
       }
     } catch (e) {
       AppLogger.logError(_tag, 'apivideo start failed', e, null);
       // Best-effort: tell the backend the stream never went live so the
       // session isn't stuck in "scheduled" forever.
-      final sid = session['id'] as String?;
-      if (sid != null) {
-        try { await LiveRepository.instance.endLive(sid); } catch (_) {}
-      }
+      // Spec session created via live/start — revoke it via live/stop so it
+      // isn't left stuck in 'ready'.
+      try { await LiveRepository.instance.stopLiveSpec(); } catch (_) {}
       if (!mounted) return;
       setState(() => _isStarting = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2272,9 +2260,8 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
     // stuck on a "live" UI long after the host left the page. Backend's
     // MarkLive() also now refuses to revive an ended row, but ordering
     // the call this way removes the race entirely.
-    if (sid != null) {
-      try { await LiveRepository.instance.endLive(sid); } catch (_) {}
-    }
+    // Spec stop: kết thúc phiên đang mở của host (theo JWT) + revoke token.
+    try { await LiveRepository.instance.stopLiveSpec(); } catch (_) {}
     try { await ctrl?.stopStreaming(); } catch (_) {}
     try { await ctrl?.dispose(); } catch (_) {}
     // Foreground service already stopped above (before navigation) to

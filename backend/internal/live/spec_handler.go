@@ -97,6 +97,10 @@ func (h *Handler) specStart(c *gin.Context) {
 	httpx.SetMessage(c, "Tạo phiên live thành công")
 	c.JSON(http.StatusOK, gin.H{
 		"id":                       sess.ID,
+		// session_id is the internal UUID — not part of the mobile spec, but
+		// the in-app host UI uses it to address the legacy product / coupon /
+		// stats endpoints (which key by session UUID, not the integer id).
+		"session_id":               sess.SessionUUID(),
 		"stream_key":               sess.StreamKey,
 		"publish_token":            sess.PublishToken,
 		"publish_token_expires_at": sess.PublishTokenExpiresAt,
@@ -158,8 +162,10 @@ func (h *Handler) specMy(c *gin.Context) {
 	urls := h.svc.SpecPublishURLs(sess.StreamKey, sess.PublishToken)
 	c.JSON(http.StatusOK, gin.H{
 		"id":                       sess.ID,
+		"session_id":               sess.SessionUUID(),
 		"stream_key":               sess.StreamKey,
 		"rtmp_url":                 urls.RTMPURL,
+		"rtmp_base":                urls.RTMPBase,
 		"hls_url":                  urls.HLSURL,
 		"publish_token":            sess.PublishToken,
 		"publish_token_expires_at": sess.PublishTokenExpiresAt,

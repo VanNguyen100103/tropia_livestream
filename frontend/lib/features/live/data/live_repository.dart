@@ -74,6 +74,50 @@ class LiveRepository {
     await _dio.post('/api/live/streams/$sessionId/end');
   }
 
+  // ── Spec host flow (LIVESTREAM_API.md §5) ───────────────────────────────────
+
+  /// Tạo phiên live theo spec (POST /api/live/start). Trả về raw `data`:
+  ///   { id (seq), session_id (uuid), stream_key, publish_token,
+  ///     rtmp_url (đã kèm ?token=), rtmp_base, hls_url, status, title,
+  ///     created_at }
+  /// Đóng phiên ready/live cũ của cùng user. Cần JWT.
+  Future<Map<String, dynamic>> startLiveSpec({
+    required String title,
+  }) async {
+    try {
+      final res = await _dio.post('/api/live/start', data: {
+        if (title.isNotEmpty) 'title': title,
+      });
+      return (res.data as Map).cast<String, dynamic>();
+    } on DioException catch (e) {
+      AppLogger.logError(_tag, 'startLiveSpec failed ${e.response?.statusCode}: ${e.response?.data}', e, null);
+      rethrow;
+    }
+  }
+
+  /// Kết thúc phiên đang mở của user (POST /api/live/stop). Cần JWT.
+  /// Idempotent — không có phiên mở vẫn trả success.
+  Future<void> stopLiveSpec() async {
+    try {
+      await _dio.post('/api/live/stop');
+    } catch (e) {
+      AppLogger.logError(_tag, 'stopLiveSpec failed', e, null);
+    }
+  }
+
+  /// Phiên ready/live hiện tại của host (GET /api/live/my). Null nếu không có.
+  Future<Map<String, dynamic>?> fetchMyLive() async {
+    try {
+      final res = await _dio.get('/api/live/my');
+      final data = res.data;
+      if (data is Map) return data.cast<String, dynamic>();
+      return null;
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchMyLive failed', e, null);
+      return null;
+    }
+  }
+
   /// Host-only: toggle DeepSeek auto-reply bot for this session.
   Future<bool> setBotEnabled(String sessionId, bool enabled) async {
     final res = await _dio.patch('/api/live/streams/$sessionId/bot',

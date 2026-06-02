@@ -701,23 +701,47 @@ class LiveProvider extends ChangeNotifier {
     final sellerId   = authUser?.id ?? '';
     final sellerName = authUser?.name ?? 'Seller';
 
-    final result = await LiveRepository.instance.startLive(
-      title:    title,
-      category: category,
-      products: products,
-      coupons:  coupons,
-    );
+    // Spec host flow (POST /api/live/start) — trả id seq + session_id (UUID)
+    // + stream_key + rtmp_url(token) + hls_url.
+    final result = await LiveRepository.instance.startLiveSpec(title: title);
 
-    final session      = result['session'] as Map<String, dynamic>;
-    final sessionId    = session['id'] as String;
-    final streamKey    = (session['stream_key'] as String?) ?? '';
+    final sessionId = (result['session_id'] as String?) ?? '';
+    final streamKey = (result['stream_key'] as String?) ?? '';
+    final hlsUrl    = result['hls_url'] as String?;
 
     _hostSessionId   = sessionId;
     _hostChannelName = streamKey;
 
+    // Gắn sản phẩm đã chọn vào session (legacy endpoint, key theo UUID) để
+    // viewer thấy carousel sản phẩm.
+    if (sessionId.isNotEmpty && products.isNotEmpty) {
+      try {
+        await LiveRepository.instance.addSessionProducts(sessionId, [
+          for (int i = 0; i < products.length; i++)
+            {
+              'product_id':     products[i].productId ?? products[i].id,
+              'product_name':   products[i].name,
+              'image_url':      products[i].imageUrl,
+              'original_price': products[i].originalPrice,
+              'sale_price':     products[i].salePrice,
+              'discount_pct':   products[i].discountPercent,
+              'stock_left':     products[i].stockLeft,
+              'unit':           products[i].unit,
+              'is_pinned':      i == 0,
+            },
+        ]);
+      } catch (e) {
+        AppLogger.logError(_tag, 'attach products (host) failed', e, null);
+      }
+    }
+
     // Add stream to top of list so buyer sees it immediately
     final newStream = LiveStream(
       id:              sessionId,
+      streamKey:       streamKey,
+      streamUrl:       (hlsUrl == null || hlsUrl.isEmpty)
+                           ? null
+                           : AppConfig.resolveBackendUrl(hlsUrl),
       sellerId:        sellerId,
       sellerName:      sellerName,
       sellerAvatarUrl: authUser?.avatarUrl ?? AppUrls.placeholderAvatar,
@@ -752,9 +776,10 @@ class LiveProvider extends ChangeNotifier {
   Future<void> unpublishHostStream() async {
     if (_hostSessionId == null) return;
     try {
-      await LiveRepository.instance.endLive(_hostSessionId!);
+      // Spec stop (POST /api/live/stop) — kết thúc phiên đang mở của host.
+      await LiveRepository.instance.stopLiveSpec();
     } catch (e) {
-      AppLogger.logError(_tag, 'endLive failed', e, null);
+      AppLogger.logError(_tag, 'stopLiveSpec failed', e, null);
     }
     _streams.removeWhere((s) => s.id == _hostSessionId);
     _hostSessionId   = null;
