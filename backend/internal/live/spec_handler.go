@@ -26,7 +26,10 @@ import (
 // RegisterSpec wires the LIVESTREAM_API.md endpoint surface under the
 // group (mounted at /api/live). authMw is applied to host/chat/gift
 // actions; the rest are public.
-func (h *Handler) RegisterSpec(r *gin.RouterGroup, authMw gin.HandlerFunc) {
+// RegisterSpec wires the spec endpoints. liveGate restricts who may start a
+// live (shop owner / approved member / admin); pass a no-op middleware to
+// allow any authenticated user.
+func (h *Handler) RegisterSpec(r *gin.RouterGroup, authMw, liveGate gin.HandlerFunc) {
 	startLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 10, WindowMs: 60 * 60 * 1000, FailClosed: false})
 	chatLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 8, WindowMs: 3 * 1000, FailClosed: false})
 	listLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 120, WindowMs: 60 * 1000, FailClosed: false})
@@ -40,7 +43,8 @@ func (h *Handler) RegisterSpec(r *gin.RouterGroup, authMw gin.HandlerFunc) {
 
 	// Authenticated (host / buyer) endpoints.
 	a := r.Group("", authMw)
-	a.POST("/start", startLimit, h.specStart)
+	// Only authorized accounts may go live (platform rule).
+	a.POST("/start", liveGate, startLimit, h.specStart)
 	a.POST("/stop", h.specStop)
 	a.GET("/my", h.specMy)
 	a.POST("/chat/send", chatLimit, h.specChatSend)

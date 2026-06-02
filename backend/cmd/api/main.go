@@ -301,14 +301,27 @@ func main() {
 		WithStreamKeyProvider(streamKeyProvider).
 		WithAudit(auditRepo).
 		WithMuteRepo(muteRepo)
+	// Live-permission gate (platform rule): only a shop owner, an approved
+	// member with can_live, or an admin may start/manage a livestream —
+	// unlike Shopee where anyone can. Replaces the plain seller role check
+	// on the live routes.
+	memberRepo := live.NewShopMemberRepository(db)
+	liveGate := live.RequireLivePermission(memberRepo)
+
 	// LIVESTREAM_API.md endpoint surface: live/start, live/stop, live/my,
 	// live/list, live/watch, live/chat/*, live/gifts*, live/gift/send.
-	liveH.RegisterSpec(router.Group("/api/live"), authMw)
+	liveH.RegisterSpec(router.Group("/api/live"), authMw, liveGate)
 	// Legacy /streams surface kept registered alongside the spec routes so
 	// the existing Flutter UI (products, coupons, pinned product, stats,
-	// VOD timeline, chat WS) keeps working. No path collisions with the
-	// spec endpoints above.
-	liveH.Register(router.Group("/api/live"), authMw, sellerMw)
+	// VOD timeline, chat WS) keeps working. Session-management endpoints are
+	// gated by the same live-permission check (per-session ownership still
+	// applies inside each handler).
+	liveH.Register(router.Group("/api/live"), authMw, liveGate)
+
+	// Shop owner manages who may livestream for their shop (grant/approve
+	// staff + collaborators). Owner-only — enforced in the handler.
+	memberH := live.NewMemberHandler(memberRepo)
+	memberH.Register(router.Group("/api/live"), authMw)
 
 	// AI endpoints (DeepSeek-backed) on top of live sessions.
 	aiH := live.NewAIHandler(deepseek, sessRepo).WithCoupons(cpnRepo)
