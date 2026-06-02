@@ -156,19 +156,21 @@ func (r *SessionRepository) StartSpecSession(ctx context.Context, sellerID uuid.
 }
 
 // StopSpecSession marks the seller's open session offline and revokes its
-// publish token. Returns ErrNoOpenSession if there's nothing open.
-func (r *SessionRepository) StopSpecSession(ctx context.Context, sellerID uuid.UUID) (streamKey string, endedAt time.Time, err error) {
+// publish token. Returns ErrNoOpenSession if there's nothing open. The
+// session UUID is returned so the handler can push a per-session "ended"
+// event to viewers' WebSockets.
+func (r *SessionRepository) StopSpecSession(ctx context.Context, sellerID uuid.UUID) (sessionID uuid.UUID, streamKey string, endedAt time.Time, err error) {
 	row := r.pool.QueryRow(ctx, `
 		UPDATE live_sessions
 		   SET status = 'offline', ended_at = NOW(), publish_token = NULL
 		 WHERE seller_id = $1 AND status IN ('ready', 'live')
-		 RETURNING stream_key, ended_at
+		 RETURNING id, stream_key, ended_at
 	`, sellerID)
-	err = row.Scan(&streamKey, &endedAt)
+	err = row.Scan(&sessionID, &streamKey, &endedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", time.Time{}, ErrNoOpenSession
+		return uuid.Nil, "", time.Time{}, ErrNoOpenSession
 	}
-	return streamKey, endedAt, err
+	return sessionID, streamKey, endedAt, err
 }
 
 // MySpecSession returns the seller's current ready/live session (token

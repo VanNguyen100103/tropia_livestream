@@ -123,7 +123,7 @@ func (h *Handler) specStop(c *gin.Context) {
 		c.Error(httpx.NewAuth("Thiếu Authorization token"))
 		return
 	}
-	streamKey, endedAt, err := h.repo.StopSpecSession(c.Request.Context(), uid)
+	sessionID, streamKey, endedAt, err := h.repo.StopSpecSession(c.Request.Context(), uid)
 	if errors.Is(err, ErrNoOpenSession) {
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": "Không có phiên live đang mở"})
 		return
@@ -133,6 +133,9 @@ func (h *Handler) specStop(c *gin.Context) {
 		return
 	}
 	h.publishListChange("session_ended")
+	// Push a per-session event so viewers currently watching get navigated
+	// away (status becomes 'offline').
+	h.publishStatsEvent(sessionID)
 	uidPtr, role, ip := actorFromContext(c)
 	h.logAudit(c.Request.Context(), audit.Entry{
 		ActorID: uidPtr, ActorRole: role, ActorIP: ip,

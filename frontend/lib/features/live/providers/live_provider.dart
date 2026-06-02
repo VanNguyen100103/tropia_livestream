@@ -621,7 +621,10 @@ class LiveProvider extends ChangeNotifier {
   }
 
   void _onStatsEvent(String sessionId, Map<String, dynamic> raw) {
-    if (raw['status'] == 'ended') {
+    // 'ended' (legacy) hoặc 'offline' (spec live/stop, auto-end) đều coi là
+    // phiên đã kết thúc → đưa viewer ra khỏi màn xem.
+    final st = raw['status'];
+    if (st == 'ended' || st == 'offline') {
       _stopPolling();
       onSessionEnded?.call();
       onSessionEnded = null;
