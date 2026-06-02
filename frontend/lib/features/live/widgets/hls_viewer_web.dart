@@ -99,6 +99,16 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
   int _manifestRetries = 0;
   static const int _manifestRetryBudget = 10;
   Timer? _manifestRetryTimer;
+  // Cold-start MANIFEST recovery is different from level/frag recovery:
+  // once hls.js gives up loading the playlist, startLoad() is a no-op (it
+  // resumes level/fragment loading, but there's no level when the manifest
+  // itself never parsed). Only a fresh loadSource (full reattach) re-fetches
+  // it — which is exactly why users had to press "Thử lại" by hand. This
+  // counter persists across _reattach (unlike _manifestRetries) so the
+  // cold-start reattach loop is bounded (~40s) and can't spin forever on a
+  // genuinely dead stream. Reset when the stream actually starts playing.
+  int _coldStartReattachTries = 0;
+  static const int _coldStartReattachBudget = 20;
   // True from initState until the first manifest parses successfully.
   // While true, the UI shows "Đang kết nối live..." instead of an error
   // even on transient load failures — same reason as above.
@@ -192,6 +202,7 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
       // next transient segment 404 (which will happen eventually as
       // SRS rotates segments) gets a fresh budget.
       _manifestRetries = 0;
+      _coldStartReattachTries = 0;
       _videoErrorRecoverTries = 0;
     });
     _video.onError.listen((_) {
@@ -470,9 +481,30 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
       // ask hls.js to re-fetch the playlist (startLoad walks back to the
       // freshest segment), and keep the spinner up rather than flipping
       // to "Lỗi phát video". 10-try budget × 2s = 20s of grace.
-      final isTransient = details == 'manifestLoadError' ||
-          details == 'manifestLoadTimeOut' ||
-          details == 'levelLoadError' ||
+      final manifestErr =
+          details == 'manifestLoadError' || details == 'manifestLoadTimeOut';
+      // Manifest miss (cold start: SRS hasn't published the playlist yet) —
+      // re-fetch it from scratch via a full reattach, NOT startLoad() (which
+      // can't recover a manifest that never loaded). This is the auto version
+      // of pressing "Thử lại".
+      // Only act once hls.js has exhausted its own internal manifest
+      // retries (fatal) — otherwise we'd reattach on every intermediate
+      // miss and storm the server.
+      if (manifestErr && fatal && _coldStartReattachTries < _coldStartReattachBudget) {
+        _coldStartReattachTries++;
+        _manifestRetryTimer?.cancel();
+        _manifestRetryTimer = Timer(const Duration(seconds: 2), () {
+          if (!mounted) return;
+          _reattach(resetVideoBudget: false);
+        });
+        return;
+      }
+      // Non-fatal manifest blip while hls.js is still retrying internally —
+      // let it keep trying, keep the connecting spinner up.
+      if (manifestErr && !fatal) return;
+      // Level/fragment miss (playlist exists, a segment/level URL rotated) —
+      // startLoad() walks back to the freshest segment; light + correct.
+      final isTransient = details == 'levelLoadError' ||
           details == 'levelLoadTimeOut' ||
           details == 'fragLoadError' ||
           details == 'fragLoadTimeOut';
@@ -516,6 +548,7 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
     hls.on('hlsLevelLoaded', ((JSAny _, JSObject __) {
       if (!mounted) return;
       _manifestRetries = 0;
+      _coldStartReattachTries = 0;
       _manifestRetryTimer?.cancel();
       if (_waitingForFirstManifest) {
         setState(() => _waitingForFirstManifest = false);
