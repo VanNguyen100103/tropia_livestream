@@ -199,7 +199,7 @@ func (h *Handler) specList(c *gin.Context) {
 func (h *Handler) specWatch(c *gin.Context) {
 	streamKey := strings.TrimSpace(c.Query("stream_key"))
 	if streamKey == "" {
-		c.Error(httpx.NewValidation("Thiếu stream_key", nil))
+		c.Error(httpx.NewBadRequest("Thiếu stream_key"))
 		return
 	}
 	sess, err := h.repo.SpecByStreamKey(c.Request.Context(), streamKey)
@@ -248,17 +248,17 @@ func (h *Handler) specChatSend(c *gin.Context) {
 	}
 	var req specChatSendReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.Error(httpx.NewValidation(err.Error(), nil))
+		c.Error(httpx.NewBadRequest(err.Error()))
 		return
 	}
 	if strings.TrimSpace(req.Message) == "" {
-		c.Error(httpx.NewValidation("Nội dung trống", nil))
+		c.Error(httpx.NewBadRequest("Nội dung trống"))
 		return
 	}
 	ctx := c.Request.Context()
 	sess, err := h.repo.SpecByStreamKey(ctx, req.StreamKey)
 	if err != nil || sess.Status == "offline" || sess.Status == "ended" {
-		c.Error(httpx.NewValidation("Phiên live không tồn tại hoặc đã kết thúc", nil))
+		c.Error(httpx.NewBadRequest("Phiên live không tồn tại hoặc đã kết thúc"))
 		return
 	}
 	isHost := sess.SellerID() == uid
@@ -276,7 +276,7 @@ func (h *Handler) specChatSend(c *gin.Context) {
 		sanitized, blocked := FilterChatMessage(message)
 		if blocked {
 			h.autoMuteOnFilter(ctx, sess.SessionUUID(), uid, MuteReasonAutoScam, 60*time.Second)
-			c.Error(httpx.NewValidation("Tin nhắn chứa nội dung không được phép", nil))
+			c.Error(httpx.NewBadRequest("Tin nhắn chứa nội dung không được phép"))
 			return
 		}
 		message = sanitized
@@ -298,7 +298,7 @@ func (h *Handler) specChatSend(c *gin.Context) {
 func (h *Handler) specChatHistory(c *gin.Context) {
 	streamKey := strings.TrimSpace(c.Query("stream_key"))
 	if streamKey == "" {
-		c.Error(httpx.NewValidation("Thiếu stream_key", nil))
+		c.Error(httpx.NewBadRequest("Thiếu stream_key"))
 		return
 	}
 	sess, err := h.repo.SpecByStreamKey(c.Request.Context(), streamKey)
@@ -356,7 +356,7 @@ func (h *Handler) specGiftSend(c *gin.Context) {
 	}
 	var req specGiftSendReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.Error(httpx.NewValidation(err.Error(), nil))
+		c.Error(httpx.NewBadRequest(err.Error()))
 		return
 	}
 	if req.Quantity <= 0 {
@@ -372,23 +372,23 @@ func (h *Handler) specGiftSend(c *gin.Context) {
 		return
 	}
 	if sess.Status != "live" {
-		c.Error(httpx.NewValidation("Chỉ tặng quà khi stream đang live", nil))
+		c.Error(httpx.NewBadRequest("Chỉ tặng quà khi stream đang live"))
 		return
 	}
 	if sess.SellerID() == uid {
-		c.Error(httpx.NewValidation("Không thể tự tặng quà cho chính mình", nil))
+		c.Error(httpx.NewBadRequest("Không thể tự tặng quà cho chính mình"))
 		return
 	}
 	gift, remaining, need, err := h.repo.SendGift(ctx, sess.SessionUUID(), req.StreamKey, uid, req.GiftID, req.Quantity)
 	switch {
 	case errors.Is(err, ErrGiftNotFound):
-		c.Error(httpx.NewValidation("Quà không tồn tại", nil))
+		c.Error(httpx.NewBadRequest("Quà không tồn tại"))
 		return
 	case errors.Is(err, ErrNoLoyaltyAccount):
-		c.Error(httpx.NewValidation("Bạn chưa có điểm tích lũy", nil))
+		c.Error(httpx.NewBadRequest("Bạn chưa có điểm tích lũy"))
 		return
 	case errors.Is(err, ErrInsufficientPoint):
-		c.Error(httpx.NewValidation("Không đủ điểm. Cần "+strconv.Itoa(need)+" điểm.", nil))
+		c.Error(httpx.NewBadRequest("Không đủ điểm. Cần "+strconv.Itoa(need)+" điểm."))
 		return
 	case err != nil:
 		c.Error(httpx.NewInternal("send gift", err))
@@ -404,7 +404,7 @@ func (h *Handler) specGiftSend(c *gin.Context) {
 func (h *Handler) specGiftsRecent(c *gin.Context) {
 	streamKey := strings.TrimSpace(c.Query("stream_key"))
 	if streamKey == "" {
-		c.Error(httpx.NewValidation("Thiếu stream_key", nil))
+		c.Error(httpx.NewBadRequest("Thiếu stream_key"))
 		return
 	}
 	sess, err := h.repo.SpecByStreamKey(c.Request.Context(), streamKey)

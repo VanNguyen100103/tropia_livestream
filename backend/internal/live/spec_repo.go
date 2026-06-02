@@ -22,6 +22,37 @@ import (
 // scanSession and the existing repo methods stay untouched.
 // ─────────────────────────────────────────────────────────────────────────
 
+// apiTime serialises to the spec's "YYYY-MM-DD HH:MM:SS" date format
+// (LIVESTREAM_API.md) instead of RFC3339, and marshals a zero time as
+// null. It implements sql.Scanner so pgx can scan timestamptz columns
+// straight into it.
+type apiTime struct{ t time.Time }
+
+const apiTimeLayout = "2006-01-02 15:04:05"
+
+func (a apiTime) MarshalJSON() ([]byte, error) {
+	if a.t.IsZero() {
+		return []byte("null"), nil
+	}
+	return []byte(`"` + a.t.Format(apiTimeLayout) + `"`), nil
+}
+
+func (a *apiTime) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		a.t = time.Time{}
+	case time.Time:
+		a.t = v
+	case *time.Time:
+		if v != nil {
+			a.t = *v
+		}
+	default:
+		return fmt.Errorf("apiTime: cannot scan %T", src)
+	}
+	return nil
+}
+
 // SpecHost is the host{} object embedded in list/watch responses.
 type SpecHost struct {
 	ID       int64  `json:"id"`
@@ -38,13 +69,13 @@ type SpecSession struct {
 	ID                    int64      `json:"id"`
 	StreamKey             string     `json:"stream_key"`
 	Status                string     `json:"status"`
-	Title                 string     `json:"title"`
-	PublishToken          string     `json:"publish_token,omitempty"`
-	PublishTokenExpiresAt *time.Time `json:"publish_token_expires_at,omitempty"`
-	StartedAt             *time.Time `json:"started_at,omitempty"`
-	CreatedAt             *time.Time `json:"created_at,omitempty"`
-	ViewerCount           int        `json:"viewer_count"`
-	Host                  *SpecHost  `json:"host,omitempty"`
+	Title                 string    `json:"title"`
+	PublishToken          string    `json:"publish_token,omitempty"`
+	PublishTokenExpiresAt apiTime   `json:"publish_token_expires_at"`
+	StartedAt             apiTime   `json:"started_at"`
+	CreatedAt             apiTime   `json:"created_at"`
+	ViewerCount           int       `json:"viewer_count"`
+	Host                  *SpecHost `json:"host,omitempty"`
 
 	// uuid is the internal session id — used to address chat/gift tables.
 	uuid     uuid.UUID `json:"-"`
@@ -106,14 +137,13 @@ func (r *SessionRepository) StartSpecSession(ctx context.Context, sellerID uuid.
 	}
 
 	var s SpecSession
-	var createdAt time.Time
 	err = tx.QueryRow(ctx, `
 		INSERT INTO live_sessions (seller_id, title, stream_key, status, publish_token, publish_token_expires_at)
 		VALUES ($1, $2, $3, 'ready', $4, $5)
 		RETURNING seq, id, stream_key, status, title, publish_token, publish_token_expires_at, created_at
 	`, sellerID, title, streamKey, token, expires).Scan(
 		&s.ID, &s.uuid, &s.StreamKey, &s.Status, &s.Title,
-		&s.PublishToken, &s.PublishTokenExpiresAt, &createdAt,
+		&s.PublishToken, &s.PublishTokenExpiresAt, &s.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -121,7 +151,6 @@ func (r *SessionRepository) StartSpecSession(ctx context.Context, sellerID uuid.
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	s.CreatedAt = &createdAt
 	s.sellerID = sellerID
 	return &s, nil
 }

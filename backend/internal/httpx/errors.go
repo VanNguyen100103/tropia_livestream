@@ -26,6 +26,13 @@ func (e *AppError) Unwrap() error { return e.Err }
 func NewValidation(msg string, details any) *AppError {
 	return &AppError{StatusCode: http.StatusUnprocessableEntity, Code: "VALIDATION_ERROR", Message: msg, Details: details}
 }
+
+// NewBadRequest is a 400 client error — used by the LIVESTREAM_API.md spec
+// endpoints whose business-validation failures (stream not live, rate
+// limited, insufficient points, …) are documented as HTTP 400.
+func NewBadRequest(msg string) *AppError {
+	return &AppError{StatusCode: http.StatusBadRequest, Code: "BAD_REQUEST", Message: msg}
+}
 func NewAuth(msg string) *AppError {
 	return &AppError{StatusCode: http.StatusUnauthorized, Code: "UNAUTHORIZED", Message: msg}
 }

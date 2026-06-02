@@ -257,6 +257,11 @@ func main() {
 	})
 	authH.Register(router.Group("/api/auth"), authMw, cc)
 
+	// Spec login alias (LIVESTREAM_API.md §2): POST /api/login with
+	// {username (SĐT/email), password} → {token, expires, user{...}}.
+	loginAliasLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{Limit: 5, WindowMs: 60 * 1000, FailClosed: true})
+	router.POST("/api/login", loginAliasLimit, authH.LoginSpec)
+
 	googleOAuth := auth.NewGoogleOAuth(authSvc, rds, auth.GoogleOAuthConfig{
 		ClientID:     cfg.GoogleClientID,
 		ClientSecret: cfg.GoogleClientSecret,

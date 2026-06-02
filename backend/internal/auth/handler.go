@@ -170,6 +170,52 @@ func (h *Handler) login(c *gin.Context) {
 	})
 }
 
+// loginSpecReq mirrors the spec login body (LIVESTREAM_API.md §2):
+// `username` is the SĐT (or email) + `password`.
+type loginSpecReq struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// LoginSpec implements the spec `POST /api/login` — returns
+// `data.{token, expires, user{id:int, username, email, full_name,
+// so_dien_thoai}}`. Distinct from /api/auth/login (which the web app uses)
+// so a mobile client built to LIVESTREAM_API.md works unchanged.
+func (h *Handler) LoginSpec(c *gin.Context) {
+	var req loginSpecReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(httpx.NewValidation(err.Error(), nil))
+		return
+	}
+	res, err := h.svc.LoginByUsername(c.Request.Context(), req.Username, req.Password)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	h.setRefreshCookie(c, res.RefreshTokenRaw, res.ExpiresAt)
+	seq, _ := h.svc.repo.SeqByID(c.Request.Context(), res.User.ID)
+	phone := ""
+	if res.User.Phone != nil {
+		phone = *res.User.Phone
+	}
+	username := phone
+	if username == "" {
+		username = res.User.Email
+	}
+	httpx.SetMessage(c, "Đăng nhập thành công")
+	c.JSON(http.StatusOK, gin.H{
+		"token":   res.AccessToken,
+		"expires": time.Now().Add(h.svc.AccessTTL()).Unix(),
+		"user": gin.H{
+			"id":            seq,
+			"username":      username,
+			"email":         res.User.Email,
+			"full_name":     res.User.Name,
+			"so_dien_thoai": phone,
+		},
+	})
+}
+
 func (h *Handler) refresh(c *gin.Context) {
 	raw, _ := c.Cookie("refresh_token")
 	if raw == "" {

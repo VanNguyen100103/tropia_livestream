@@ -103,6 +103,34 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*Profile, e
 	return &p, nil
 }
 
+// FindByPhone resolves a profile by phone number — used by the spec
+// `POST /api/login` where `username` is the user's SĐT. Returns ErrNotFound
+// when no profile has that phone.
+func (r *Repository) FindByPhone(ctx context.Context, phone string) (*Profile, error) {
+	const q = `
+		SELECT id, email, password_hash, name, phone, shop_name, role, avatar_url, google_id, status,
+		       email_verified, failed_login_attempts, locked_until, created_at
+		FROM profiles WHERE phone = $1
+	`
+	var p Profile
+	row := r.pool.QueryRow(ctx, q, phone)
+	if err := scanProfile(row, &p); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+// SeqByID returns the integer `seq` of a profile (the spec exposes user
+// ids as integers, e.g. host.id / user.id). 0 if not found.
+func (r *Repository) SeqByID(ctx context.Context, id uuid.UUID) (int64, error) {
+	var seq int64
+	err := r.pool.QueryRow(ctx, `SELECT COALESCE(seq, 0) FROM profiles WHERE id = $1`, id).Scan(&seq)
+	return seq, err
+}
+
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (*Profile, error) {
 	const q = `
 		SELECT id, email, password_hash, name, phone, shop_name, role, avatar_url, google_id, status,

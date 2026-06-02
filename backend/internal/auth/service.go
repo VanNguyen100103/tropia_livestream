@@ -291,6 +291,33 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (*Login
 	if err != nil {
 		return nil, httpx.NewAuth("invalid credentials")
 	}
+	return s.completeLogin(ctx, user, password)
+}
+
+// LoginByUsername authenticates by either email (when `username` contains
+// '@') or phone number — the spec `POST /api/login` passes the user's SĐT
+// as `username`.
+func (s *AuthService) LoginByUsername(ctx context.Context, username, password string) (*LoginResult, error) {
+	username = strings.TrimSpace(username)
+	var user *Profile
+	var err error
+	if strings.Contains(username, "@") {
+		user, err = s.repo.FindByEmail(ctx, strings.ToLower(username))
+	} else {
+		user, err = s.repo.FindByPhone(ctx, username)
+	}
+	if err != nil {
+		return nil, httpx.NewAuth("invalid credentials")
+	}
+	return s.completeLogin(ctx, user, password)
+}
+
+// AccessTTL exposes the access-token lifetime (for the spec `expires`).
+func (s *AuthService) AccessTTL() time.Duration { return s.jwt.AccessTTL() }
+
+// completeLogin runs the shared post-lookup checks (status, verification,
+// lockout, password) and issues a token pair.
+func (s *AuthService) completeLogin(ctx context.Context, user *Profile, password string) (*LoginResult, error) {
 	if user.Status != nil && *user.Status == "deleted" {
 		return nil, httpx.NewAuth("invalid credentials")
 	}

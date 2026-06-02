@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,7 +26,7 @@ type SpecChatMessage struct {
 	DisplayName string         `json:"display_name"`
 	Avatar      string         `json:"avatar"`
 	Meta        map[string]any `json:"meta"`
-	CreatedAt   time.Time      `json:"created_at"`
+	CreatedAt   apiTime        `json:"created_at"`
 }
 
 // GiftCatalogItem is one purchasable gift type.
@@ -52,9 +51,9 @@ type SpecGift struct {
 	GiftName     string    `json:"gift_name"`
 	GiftIconURL  *string   `json:"gift_icon_url"`
 	Quantity     int       `json:"quantity"`
-	TotalPoints  int       `json:"total_points"`
-	DisplayValue int       `json:"display_value"`
-	CreatedAt    time.Time `json:"created_at"`
+	TotalPoints  int     `json:"total_points"`
+	DisplayValue int     `json:"display_value"`
+	CreatedAt    apiTime `json:"created_at"`
 }
 
 // Sentinel errors for the gift flow — the handler maps each to a
@@ -112,7 +111,7 @@ func (r *SessionRepository) ChatHistory(ctx context.Context, sessionID uuid.UUID
 		SELECT cm.seq, COALESCE(p.seq, 0), cm.message, cm.type, cm.gift_id, cm.created_at,
 		       COALESCE(cm.username, ''), COALESCE(cm.avatar_url, ''),
 		       lg.id, COALESCE(p2.seq, 0), COALESCE(p2.name, ''), COALESCE(p2.avatar_url, ''),
-		       gc.id, gc.code, gc.name, gc.icon_url, lg.quantity, lg.total_points, lg.display_value
+		       gc.id, COALESCE(gc.code, ''), COALESCE(gc.name, ''), gc.icon_url, lg.quantity, lg.total_points, lg.display_value
 		  FROM chat_messages cm
 		  LEFT JOIN profiles p   ON p.id = cm.user_id
 		  LEFT JOIN live_gifts lg ON lg.id = cm.gift_id

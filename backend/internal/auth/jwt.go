@@ -38,6 +38,10 @@ func NewService(accessSecret, refreshSecret string, accessTTL, refreshTTL time.D
 	}
 }
 
+// AccessTTL exposes the access-token lifetime so handlers can report an
+// absolute expiry (spec login returns `expires` as a unix timestamp).
+func (s *Service) AccessTTL() time.Duration { return s.accessTTL }
+
 func (s *Service) SignAccess(userID string, role Role) (string, error) {
 	return s.sign(userID, role, s.accessSecret, s.accessTTL)
 }
