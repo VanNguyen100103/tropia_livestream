@@ -65,11 +65,46 @@ func NewMemberHandler(repo *ShopMemberRepository) *MemberHandler {
 }
 
 func (h *MemberHandler) Register(r *gin.RouterGroup, authMw gin.HandlerFunc) {
+	// Lets the app decide whether to show the "Phát live" entry up front
+	// instead of letting an unauthorized user fill the setup form only to
+	// be 403'd at live/start.
+	r.GET("/can-live", authMw, h.canLive)
+
 	g := r.Group("/members", authMw)
 	g.GET("", h.list)
 	g.POST("", h.add)
 	g.PATCH("/:userSeq", h.update)
 	g.DELETE("/:userSeq", h.remove)
+}
+
+// canLive reports whether the caller may start a livestream (admin / shop
+// owner / approved member) so the client can hide or disable the go-live
+// button. Returns { can_live, is_admin, shop_id }.
+func (h *MemberHandler) canLive(c *gin.Context) {
+	claims, ok := auth.ClaimsFrom(c)
+	if !ok {
+		c.Error(httpx.NewAuth("Thiếu Authorization token"))
+		return
+	}
+	if claims.Role == auth.RoleAdmin {
+		c.JSON(http.StatusOK, gin.H{"can_live": true, "is_admin": true, "shop_id": nil})
+		return
+	}
+	uid, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		c.Error(httpx.NewAuth("token không hợp lệ"))
+		return
+	}
+	shopID, allowed, err := h.repo.AuthorizedShop(c.Request.Context(), uid)
+	if err != nil {
+		c.Error(httpx.NewInternal("check live permission", err))
+		return
+	}
+	resp := gin.H{"can_live": allowed, "is_admin": false, "shop_id": nil}
+	if allowed {
+		resp["shop_id"] = shopID
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // ownerShop resolves the calling owner's shop, or writes a 403 and returns

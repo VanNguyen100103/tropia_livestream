@@ -74,6 +74,19 @@ class LiveRepository {
     await _dio.post('/api/live/streams/$sessionId/end');
   }
 
+  /// Hỏi backend xem user hiện tại có quyền phát live không
+  /// (GET /api/live/can-live). Trả null nếu lỗi mạng (caller giữ fallback).
+  Future<bool?> canLive() async {
+    try {
+      final res = await _dio.get('/api/live/can-live');
+      final data = res.data as Map<String, dynamic>;
+      return data['can_live'] == true;
+    } catch (e) {
+      AppLogger.logError(_tag, 'canLive failed', e, null);
+      return null;
+    }
+  }
+
   // ── Spec host flow (LIVESTREAM_API.md §5) ───────────────────────────────────
 
   /// Tạo phiên live theo spec (POST /api/live/start). Trả về raw `data`:
