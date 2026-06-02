@@ -275,10 +275,18 @@ class _LiveTabScreenState extends State<LiveTabScreen>
         color: AppColors.primary,
         onRefresh: () => context.read<LiveProvider>().refresh(),
         child: CustomScrollView(
+          // Stable keys on every sliver so the card list (and the muted
+          // preview players inside it) survive a rebuild when the followed-
+          // shops row / live banner appear or disappear between refreshes.
+          // Without keys, toggling those leading slivers shifts positions →
+          // the keyless SliverList gets matched to the wrong slot → its
+          // whole subtree remounts → HlsViewerWeb restarts from segment 0
+          // → the "reload thumbnail 2-3 lần" flicker.
           slivers: [
             // Hàng followed shops đang live (chỉ tab Live)
             if (_tabController.index == 1 && followedLive.isNotEmpty)
               SliverToBoxAdapter(
+                key: const ValueKey('followed-shops-row'),
                 child: _FollowedShopsRow(
                   streams: followedLive,
                   onTap: _openStream,
@@ -288,6 +296,7 @@ class _LiveTabScreenState extends State<LiveTabScreen>
             // Banner số buổi live (chỉ tab Live)
             if (_tabController.index == 1)
               SliverToBoxAdapter(
+                key: const ValueKey('live-now-banner'),
                 child: _buildLiveNowBanner(
                   streams.where((s) => s.status == StreamStatus.live).length,
                 ),
@@ -295,8 +304,10 @@ class _LiveTabScreenState extends State<LiveTabScreen>
 
             // List card full-width (Shopee style)
             SliverList(
+              key: const ValueKey('live-card-list'),
               delegate: SliverChildBuilderDelegate(
                 (context, index) => Column(
+                  key: ValueKey('live-card-${streams[index].id}'),
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     LiveCardWidget(
@@ -308,9 +319,22 @@ class _LiveTabScreenState extends State<LiveTabScreen>
                   ],
                 ),
                 childCount: streams.length,
+                // Map a child's key back to its index so the builder reuses
+                // the right element when the list order/length shifts.
+                findChildIndexCallback: (Key key) {
+                  if (key is ValueKey<String>) {
+                    final id = key.value.replaceFirst('live-card-', '');
+                    final idx = streams.indexWhere((s) => s.id == id);
+                    return idx == -1 ? null : idx;
+                  }
+                  return null;
+                },
               ),
             ),
-            const SliverToBoxAdapter(child: SizedBox(height: AppSizes.xxl)),
+            const SliverToBoxAdapter(
+              key: ValueKey('bottom-padding'),
+              child: SizedBox(height: AppSizes.xxl),
+            ),
           ],
         ),
       ),

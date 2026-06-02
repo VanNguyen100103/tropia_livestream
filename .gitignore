@@ -84,3 +84,6 @@ k8s/secrets.yaml
 infra/data/
 infra/dvr/
 .commit_msg.tmp
+
+# Stray screen-recording artifacts
+backend/cmd/bake-test/Screen Recording*.mp4

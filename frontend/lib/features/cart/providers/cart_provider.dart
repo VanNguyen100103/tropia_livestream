@@ -100,6 +100,22 @@ class CartProvider extends ChangeNotifier {
     }
   }
 
+  /// Merge an item that was already added to the backend cart elsewhere
+  /// (e.g. from the live stream via LiveProvider, which calls CartRepository
+  /// directly). Updates totalCount → the bottom-nav badge rebuilds immediately
+  /// without waiting for the user to open the cart tab. Mirrors addItem's
+  /// merge logic but skips the network call since the caller already did it.
+  void ingestItem(CartItemModel item) {
+    final idx = _items.indexWhere((i) => i.id == item.id);
+    if (idx >= 0) {
+      _items[idx] = item;
+    } else {
+      _items.insert(0, item);
+    }
+    _recalcSummary();
+    notifyListeners();
+  }
+
   // ── Quantity ──────────────────────────────────────────────────────────────
 
   Future<void> updateQuantity(String itemId, int quantity) async {

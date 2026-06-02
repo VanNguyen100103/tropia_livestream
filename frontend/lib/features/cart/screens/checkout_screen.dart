@@ -221,8 +221,6 @@ class _CheckoutScreenState extends State<CheckoutScreen>
           return 'Mã giảm giá $code đã hết hạn. Voucher đã được gỡ khỏi đơn — vui lòng đặt lại.';
         case 'inactive':
           return 'Mã giảm giá $code đã ngừng áp dụng. Voucher đã được gỡ khỏi đơn — vui lòng đặt lại.';
-        case 'already_used':
-          return 'Bạn đã sử dụng mã $code trước đó. Voucher đã được gỡ khỏi đơn — vui lòng đặt lại.';
         case 'min_order':
           return 'Đơn chưa đạt giá trị tối thiểu để dùng mã $code. Voucher đã được gỡ khỏi đơn.';
         case 'not_found':

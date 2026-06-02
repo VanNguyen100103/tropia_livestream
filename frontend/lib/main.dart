@@ -102,8 +102,14 @@ class TropiaApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => UserProvider()),
-        ChangeNotifierProvider(create: (_) => LiveProvider()),
         ChangeNotifierProvider(create: (_) => CartProvider()),
+        // LiveProvider depends on CartProvider so live add-to-cart can update
+        // the global cart (and the bottom-nav badge) immediately. ProxyProvider
+        // keeps a single LiveProvider instance and re-injects the cart on update.
+        ChangeNotifierProxyProvider<CartProvider, LiveProvider>(
+          create: (_) => LiveProvider(),
+          update: (_, cart, live) => (live ?? LiveProvider())..cartProvider = cart,
+        ),
         ChangeNotifierProvider(create: (_) => ShopProvider()),
       ],
       child: MaterialApp(

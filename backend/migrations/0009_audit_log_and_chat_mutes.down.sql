@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS chat_mutes;
+DROP TABLE IF EXISTS audit_log;

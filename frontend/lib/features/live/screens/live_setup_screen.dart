@@ -2755,13 +2755,14 @@ class _CouponDialogState extends State<_CouponDialog> {
                 controller: _maxUsesCtrl,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                  labelText: 'Số lượt dùng tối đa (để trống = không giới hạn)',
+                  labelText: 'Số lượt dùng tối đa',
+                  helperText: 'Tổng số lượt cho cả phiên; mỗi người có thể dùng lại đến khi hết',
                   border: OutlineInputBorder(),
                   isDense: true,
                   suffixText: 'lượt',
                 ),
                 validator: (v) {
-                  if (v == null || v.trim().isEmpty) return null;
+                  if (v == null || v.trim().isEmpty) return 'Vui lòng nhập số lượt dùng';
                   final n = int.tryParse(v.trim());
                   if (n == null || n <= 0) return 'Phải là số nguyên dương';
                   return null;

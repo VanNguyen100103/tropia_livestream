@@ -142,12 +142,36 @@ func (r *SessionRepository) GetByChannel(ctx context.Context, channel string) (*
 }
 
 func (r *SessionRepository) ListActive(ctx context.Context, limit int) ([]Session, error) {
-	// Use the live row count from live_viewers for viewer_count instead of
-	// the cached column. The card list on the Live tab is the most visible
-	// place the counter shows, and the cached column drifts whenever a
-	// client disconnects without firing /leave — host seeing "1 đang xem"
-	// after viewers actually left was the symptom.
-	const q = `
+	return r.ListActiveCursor(ctx, limit, time.Time{}, uuid.Nil)
+}
+
+// ListActiveCursor is the cursor-paginated variant — preferred for
+// any caller that might walk past the first page (threat 7 — DB
+// scraping). The cursor is the (started_at, id) of the last row
+// returned in the previous page; rows strictly past that point in
+// the (started_at DESC, id DESC) order come back.
+//
+// Why cursor over OFFSET: a bot that knows how to ?offset=50&offset=100…
+// can enumerate the entire table. Cursors require knowing the last
+// row's primary keys, which an attacker can only learn by walking
+// through the natural pagination — and the rate limiter already
+// gates that walk. Equally important, cursors are stable under
+// concurrent inserts (offset shifts every time a new session goes
+// live).
+//
+// Passing cursorTime.IsZero() / cursorID == uuid.Nil returns the
+// first page — same behaviour as the old offset-less call.
+func (r *SessionRepository) ListActiveCursor(ctx context.Context, limit int, cursorTime time.Time, cursorID uuid.UUID) ([]Session, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	// The cursor condition is a tuple comparison: (started_at, id) <
+	// (cursorTime, cursorID). PostgreSQL natively supports row
+	// constructor comparison, but pgx's parameter binding is fussier
+	// — express it as ORs for portability.
+	var rows pgx.Rows
+	var err error
+	const base = `
 		SELECT ls.id, ls.seller_id, ls.title, ls.description, ls.cover_image_url, ls.category, ls.stream_key, ls.status,
 		       ls.started_at, ls.ended_at,
 		       COALESCE(vc.cnt, 0) AS viewer_count,
@@ -163,10 +187,16 @@ func (r *SessionRepository) ListActive(ctx context.Context, limit int) ([]Sessio
 		    GROUP BY session_id
 		) vc ON vc.session_id = ls.id
 		WHERE ls.status = 'live'
-		ORDER BY ls.started_at DESC
-		LIMIT $1
 	`
-	rows, err := r.pool.Query(ctx, q, limit)
+	if cursorTime.IsZero() {
+		rows, err = r.pool.Query(ctx, base+
+			` ORDER BY ls.started_at DESC, ls.id DESC LIMIT $1`, limit)
+	} else {
+		rows, err = r.pool.Query(ctx, base+
+			` AND (ls.started_at < $1 OR (ls.started_at = $1 AND ls.id < $2))
+			  ORDER BY ls.started_at DESC, ls.id DESC LIMIT $3`,
+			cursorTime, cursorID, limit)
+	}
 	if err != nil {
 		return nil, err
 	}

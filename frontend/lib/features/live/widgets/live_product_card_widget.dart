@@ -179,8 +179,9 @@ class LiveProductCardWidget extends StatelessWidget {
               ),
             ),
           )
-        // Stock warning (ít hàng, only for non-variant products)
-        else if (product.stockLeft <= 20)
+        // Stock count — always shown for non-variant products (variant
+        // products show "Nhiều mẫu" instead, since stock is per-SKU).
+        else
           Positioned(
             bottom: 0,
             left: 0,

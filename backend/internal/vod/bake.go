@@ -39,7 +39,19 @@ type BakeInput struct {
 	// (vertical mobile orientation).
 	Width  int
 	Height int
-	Logger *slog.Logger
+	// WatermarkText is burned into the bottom-right corner of every
+	// frame for forensic provenance — when a clip surfaces on YouTube
+	// or other platforms, the watermark proves it originated on Tropia
+	// and (with the session id substring) identifies which session.
+	// Threat 3 (recording + reupload). Empty disables the watermark.
+	WatermarkText string
+	// WatermarkFontPath overrides the auto-detected system font for
+	// the watermark. Leave empty to let Bake probe common locations
+	// (Windows Arial, Linux DejaVu, macOS Helvetica). If nothing is
+	// found and this is empty, the watermark is silently skipped with
+	// a warning log — the bake still succeeds without it.
+	WatermarkFontPath string
+	Logger            *slog.Logger
 }
 
 // Bake runs the FFmpeg pipeline: re-encode FLV → MP4 with chat
@@ -167,6 +179,28 @@ func Bake(ctx context.Context, in BakeInput) (string, error) {
 			prev, inLabel, x, y, startSec, endSec, outLabel)
 		prev = outLabel
 	}
+	// Forensic watermark — drawn LAST so it sits above every overlay.
+	// We use a numeric label index continuing past the overlay count
+	// (assets are indexed v1..vN by the loop above) so rebuildWithVOut
+	// finds and renames it to [vout] without colliding.
+	watermarkApplied := false
+	wmText := in.WatermarkText
+	if wmText == "" {
+		wmText = "TROPIA · " + shortID(in.SessionID.String())
+	}
+	if fontPath := resolveWatermarkFont(in.WatermarkFontPath); fontPath != "" {
+		wmLabel := fmt.Sprintf("[v%d]", len(assets)+1)
+		fmt.Fprintf(&fg,
+			"%sdrawtext=fontfile='%s':text='%s':fontcolor=white@0.75:fontsize=28:box=1:boxcolor=black@0.4:boxborderw=8:x=W-tw-32:y=H-th-32%s;",
+			prev, escapeFFmpegPath(fontPath), escapeFFmpegText(wmText), wmLabel)
+		prev = wmLabel
+		watermarkApplied = true
+	} else {
+		in.Logger.Warn("vod bake: no system font found — watermark skipped",
+			"session_id", in.SessionID,
+			"hint", "set BakeInput.WatermarkFontPath to enable forensic watermark")
+	}
+	_ = watermarkApplied
 	// Drop trailing `;` and label the final output as [vout].
 	filterStr := strings.TrimSuffix(fg.String(), ";")
 	// Rename prev → [vout] for the -map.
@@ -222,6 +256,74 @@ func rebuildWithVOut(lastLabel, graph string) string {
 	}
 	// Fallback — append explicit copy filter.
 	return graph + ";" + lastLabel + "null[vout]"
+}
+
+// shortID returns the first 8 chars of a UUID for forensic labeling
+// without bloating the watermark line.
+func shortID(s string) string {
+	if len(s) <= 8 {
+		return s
+	}
+	return s[:8]
+}
+
+// candidateWatermarkFonts lists the most likely places to find a usable
+// truetype font for FFmpeg drawtext, in priority order. We probe one by
+// one so the watermark works on dev (Windows), CI (Linux), and any
+// future macOS build host without explicit configuration.
+var candidateWatermarkFonts = []string{
+	// Windows
+	`C:\Windows\Fonts\arial.ttf`,
+	`C:\Windows\Fonts\segoeui.ttf`,
+	`C:\Windows\Fonts\calibri.ttf`,
+	// Linux (Debian/Ubuntu)
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+	"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+	// Alpine (Docker images)
+	"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+	// macOS
+	"/System/Library/Fonts/Helvetica.ttc",
+	"/Library/Fonts/Arial.ttf",
+}
+
+// resolveWatermarkFont returns the first usable font path or "" if none
+// were found. An explicit override always wins (caller may know their
+// production AMI bundles a specific font).
+func resolveWatermarkFont(override string) string {
+	if override != "" {
+		if _, err := os.Stat(override); err == nil {
+			return override
+		}
+	}
+	for _, p := range candidateWatermarkFonts {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// escapeFFmpegPath rewrites a filesystem path so it survives FFmpeg's
+// filter-graph parser. Windows paths in particular trip the parser
+// because `:` is the option separator and `\` doubles as escape: we
+// flip backslashes to forward slashes and escape the drive-letter
+// colon. Single quotes are escaped because the path is wrapped in `'`.
+func escapeFFmpegPath(p string) string {
+	p = strings.ReplaceAll(p, `\`, `/`)
+	p = strings.ReplaceAll(p, ":", `\:`)
+	p = strings.ReplaceAll(p, "'", `\'`)
+	return p
+}
+
+// escapeFFmpegText escapes the special chars FFmpeg's drawtext consumes
+// from the `text=` value when wrapped in single quotes: backslash, colon,
+// and the closing quote itself.
+func escapeFFmpegText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "'", `\'`)
+	s = strings.ReplaceAll(s, ":", `\:`)
+	return s
 }
 
 // overlayExpr returns FFmpeg `overlay` filter expressions for x and y.

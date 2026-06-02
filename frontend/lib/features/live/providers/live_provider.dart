@@ -6,10 +6,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tropia/core/config/app_config.dart';
 import 'package:tropia/core/constants/app_constants.dart';
 import 'package:tropia/core/services/auth_service.dart';
 import 'package:tropia/core/utils/logger.dart';
 import 'package:tropia/features/cart/data/cart_repository.dart';
+import 'package:tropia/features/cart/providers/cart_provider.dart';
 import 'package:tropia/features/shop/data/shop_repository.dart';
 import 'package:tropia/features/live/data/live_repository.dart';
 import 'package:tropia/features/live/data/live_socket.dart';
@@ -49,6 +51,12 @@ class LiveProvider extends ChangeNotifier {
   LiveSocket? _socket;
   LiveListSocket? _listSocket;
   String? _pollingSessionId;
+
+  // Shared CartProvider, injected via ChangeNotifierProxyProvider in main.dart.
+  // Lets live add-to-cart update the global cart state (and thus the bottom-nav
+  // badge) immediately, instead of waiting for the user to open the cart tab.
+  CartProvider? _cartProvider;
+  set cartProvider(CartProvider? value) => _cartProvider = value;
 
   // Callback để live_stream_screen xử lý khi host kết thúc live
   VoidCallback? onSessionEnded;
@@ -106,21 +114,49 @@ class LiveProvider extends ChangeNotifier {
     // single REST refresh (the backend coalesces concurrent loads via
     // its 3s Redis cache, so the burst doesn't fan out to Postgres).
     _listSocket = LiveListSocket()
-      ..onChange = () {
-        // Debounce isn't strictly needed — backend cache absorbs
-        // bursts — but skip if a refresh is already in flight.
-        if (_refreshing) return;
-        refresh();
-      }
+      ..onChange = _onListChange
       ..connect();
   }
 
   bool _refreshing = false;
 
+  // The backend emits list_change on viewer join/leave, stat ticks,
+  // comments, pins, etc. — easily several per second during an active
+  // stream (observed ~5×/s). Each refresh() rebuilds the whole card list
+  // and re-runs the followed-shop fetch, and that rebuild churns the
+  // muted card-preview players: VisibilityDetector + _PreviewSlot
+  // re-evaluate, flip `_visible`, and the inner HlsViewerWeb
+  // unmounts/remounts → hls.js restarts from segment 0 → the endless
+  // 0/1/2.ts re-fetch loop the user reported. Throttle to at most one
+  // refresh per window (leading edge), with a single trailing refresh so
+  // the final state of a burst isn't missed.
+  static const _listRefreshWindow = Duration(seconds: 3);
+  Timer? _listRefreshThrottle;
+  bool _listChangePending = false;
+
+  void _onListChange() {
+    if (_listRefreshThrottle?.isActive ?? false) {
+      // Inside the cooldown — remember that something changed and let the
+      // trailing timer pick it up instead of firing another refresh now.
+      _listChangePending = true;
+      return;
+    }
+    _listChangePending = false;
+    _listRefreshThrottle = Timer(_listRefreshWindow, () {
+      if (_listChangePending && !_refreshing) {
+        _listChangePending = false;
+        refresh();
+      }
+    });
+    if (!_refreshing) refresh();
+  }
+
   @override
   void dispose() {
     _listSocket?.close();
     _listSocket = null;
+    _listRefreshThrottle?.cancel();
+    _listRefreshThrottle = null;
     _stopPolling();
     AiSuggestionService.instance.dispose();
     super.dispose();
@@ -260,13 +296,18 @@ class LiveProvider extends ChangeNotifier {
     final category = (row['category'] ?? '') as String;
     final startedAtStr = row['started_at'] as String?;
 
+    final rawPreviewHls = row['playback_hls'] as String?;
     return LiveStream(
       id:              row['id'] as String,
       sellerId:        row['seller_id'] as String,
       shopId:          row['shop_id'] as String?,
       // Preview HLS URL injected by /streams so list cards can auto-play
-      // muted previews without exposing the raw stream_key.
-      streamUrl:       row['playback_hls'] as String?,
+      // muted previews. The backend returns a path-only URL routed
+      // through the Tropia HLS proxy (no stream_key in the path), so
+      // resolve it to an absolute URL before handing it to video_player.
+      streamUrl:       rawPreviewHls == null || rawPreviewHls.isEmpty
+                           ? null
+                           : AppConfig.resolveBackendUrl(rawPreviewHls),
       // Prefer shop_name over the seller's personal profile name — viewers
       // see the business identity ("Shop của A"), not the owner's full name
       // ("Nguyễn Văn A"). Falls back to seller_name only when the seller
@@ -900,6 +941,9 @@ class LiveProvider extends ChangeNotifier {
       // Remember cart_items.id so the floating mini-cart can filter
       // CartProvider.items down to just things added during this live.
       _liveSessionCartItemIds.add(item.id);
+      // Push into the shared cart so the bottom-nav badge updates right away,
+      // without waiting for the user to open the cart tab (which triggers load()).
+      _cartProvider?.ingestItem(item);
     } catch (e) {
       AppLogger.logError(_tag, 'addSkuToCart failed', e, null);
     }

@@ -28,9 +28,12 @@ func NewCouponHandler(repo *CouponRepository) *CouponHandler {
 //                           Public; surfaced in the cart's "Tropia Voucher" row.
 //   GET  /shop/:shopId    — coupons from any live session owned by this shop.
 //                           Public so the cart screen can preload without a token.
-//   POST /validate        — auth required (RecordUsage is keyed by user_id,
-//                           so a pre-checkout validate that ignored the user
-//                           would lie about "already used" status).
+//   POST /validate        — auth required so the buyer is identified for
+//                           the order-time RecordUsage trail. The validate
+//                           result itself no longer varies per user (the
+//                           per-user "already used" check was removed — 1b);
+//                           a coupon is gated only by max_uses / expiry /
+//                           min-order.
 func (h *CouponHandler) Register(r *gin.RouterGroup, authMw gin.HandlerFunc) {
 	r.GET("/available", h.listPlatform)
 	r.GET("/shop/:shopId", h.listShop)

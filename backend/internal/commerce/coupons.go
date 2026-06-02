@@ -3,6 +3,7 @@ package commerce
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -13,6 +14,13 @@ import (
 
 	"github.com/tropia/backend/internal/httpx"
 )
+
+// ErrCouponExhausted is returned by RecordUsage when the redemption
+// would push used_count past max_uses. Atomic check + increment at the
+// DB layer means the race window between "ApplyCoupon validated this
+// was OK" and "we tried to record usage" doesn't oversell the coupon.
+// Threat 8 (coupon abuse — flash-sale race conditions).
+var ErrCouponExhausted = errors.New("coupon: max_uses reached")
 
 type Coupon struct {
 	ID            uuid.UUID  `json:"id"`
@@ -54,31 +62,51 @@ func (r *CouponRepository) FindByCode(ctx context.Context, code string) (*Coupon
 	return &c, nil
 }
 
-func (r *CouponRepository) UserHasUsed(ctx context.Context, couponID, userID uuid.UUID) (bool, error) {
-	var n int
-	err := r.pool.QueryRow(ctx,
-		`SELECT COUNT(1) FROM coupon_usages WHERE coupon_id = $1 AND user_id = $2`,
-		couponID, userID).Scan(&n)
-	return n > 0, err
-}
-
 func (r *CouponRepository) RecordUsage(ctx context.Context, couponID, userID, orderID uuid.UUID) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx,
+	if _, err = tx.Exec(ctx,
 		`INSERT INTO coupon_usages (coupon_id, user_id, order_id) VALUES ($1, $2, $3)`,
-		couponID, userID, orderID)
+		couponID, userID, orderID); err != nil {
+		return err
+	}
+	// Atomic check + increment. The UPDATE only fires when (max_uses
+	// IS NULL) — unlimited — or when used_count < max_uses, so the
+	// last redemption to land wins and any concurrent attempt that
+	// would overflow sees 0 rows affected and is rolled back. This
+	// replaces the unconditional `SELECT increment_coupon_uses($1)`
+	// which let used_count exceed max_uses under load.
+	tag, err := tx.Exec(ctx,
+		`UPDATE coupons
+		   SET used_count = used_count + 1
+		 WHERE id = $1
+		   AND (max_uses IS NULL OR used_count < max_uses)`,
+		couponID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `SELECT increment_coupon_uses($1)`, couponID)
-	if err != nil {
+	if tag.RowsAffected() == 0 {
+		// Either coupon vanished or max_uses already met — either way
+		// roll back the usage row (defer Rollback handles it) so we
+		// don't end up with phantom coupon_usages for an unincremented
+		// coupon.
+		slog.Default().Warn("coupon: redemption rejected — max_uses reached",
+			"coupon_id", couponID, "user_id", userID, "order_id", orderID)
+		return ErrCouponExhausted
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	// Structured audit log for every successful redemption — emits a
+	// searchable line into the central log stream (e.g. Loki/Grafana)
+	// so support can answer "did this user actually redeem this code"
+	// without a DB query.
+	slog.Default().Info("coupon: redemption recorded",
+		"coupon_id", couponID, "user_id", userID, "order_id", orderID)
+	return nil
 }
 
 func (r *CouponRepository) ListPlatformActive(ctx context.Context) ([]Coupon, error) {
@@ -225,10 +253,14 @@ func ApplyCoupon(ctx context.Context, r *CouponRepository, code string, userID u
 	if orderTotal < coupon.MinOrderValue {
 		return nil, failure("min_order", "order total below minimum")
 	}
-	used, _ := r.UserHasUsed(ctx, coupon.ID, userID)
-	if used {
-		return nil, failure("already_used", "coupon already used")
-	}
+	// Per-user dedup intentionally removed (option 1b). A live coupon is
+	// meant to stay usable by the same buyer after the broadcast — it
+	// persists in the shop's voucher list (ListByShop) precisely so a
+	// viewer can reuse the code they grabbed mid-live at cart checkout.
+	// Blocking the 2nd use contradicted that. Abuse is bounded instead by
+	// the now-mandatory max_uses total cap (enforced atomically in
+	// RecordUsage). `userID` is retained on the signature for the
+	// order-time usage trail and possible future per-user limits.
 	var discount int
 	if coupon.DiscountType == "percent" {
 		discount = int(math.Floor(float64(orderTotal) * coupon.DiscountValue / 100))

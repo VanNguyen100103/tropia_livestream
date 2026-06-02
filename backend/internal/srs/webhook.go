@@ -3,12 +3,16 @@ package srs
 import (
 	"context"
 	"crypto/subtle"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 
+	"github.com/tropia/backend/internal/cache"
 	"github.com/tropia/backend/internal/live"
 )
 
@@ -40,11 +44,32 @@ type Handler struct {
 	// SRS_WEBHOOK_SECRET env + matching `?secret=…` in srs.conf
 	// http_hooks URLs.
 	secret string
+	// cache is used to track active publishers per stream_key so a
+	// second publisher trying to push to a stream that's already live
+	// (threat 1 — stream hijack) is rejected at on_publish. Optional;
+	// nil disables duplicate detection (the repo-level status check
+	// still applies). See onPublish.
+	cache *cache.Cache
 }
 
 func NewHandler(repo *live.SessionRepository) *Handler {
 	return &Handler{repo: repo, events: noopPublisher{}}
 }
+
+// WithCache enables Redis-backed duplicate-publisher detection. Should
+// be wired in production.
+func (h *Handler) WithCache(c *cache.Cache) *Handler {
+	h.cache = c
+	return h
+}
+
+// publisherLockTTL is how long the publisher-claim key survives without
+// being refreshed. SRS reconnect-on-blip is the dominant case here: a
+// short network drop, RTMP reconnect within seconds, on_publish fires
+// again. The TTL has to outlast that gap (so the rightful publisher's
+// reconnect is treated as renewal, not collision) but stay short enough
+// that on_unpublish failure doesn't permanently lock the stream.
+const publisherLockTTL = 60 * time.Second
 
 // WithSecret enables shared-secret auth on webhook routes. Empty string
 // disables the check (useful in dev where SRS is on the same host and
@@ -130,12 +155,36 @@ func (h *Handler) onPublish(c *gin.Context) {
 		deny(c, 1)
 		return
 	}
+	ctx := c.Request.Context()
 	// Reject unknown streams
-	if _, err := h.repo.GetByChannel(c.Request.Context(), p.Stream); err != nil {
+	if _, err := h.repo.GetByChannel(ctx, p.Stream); err != nil {
 		deny(c, 1)
 		return
 	}
-	_ = h.repo.MarkLive(c.Request.Context(), p.Stream)
+	// Duplicate-publisher gate (threat 1). The first publisher claims a
+	// Redis key keyed by stream_key, valued with their SRS client_id; if
+	// a second client_id later tries to claim the same key while the
+	// first is still alive we deny + alert. Same client_id reconnecting
+	// (RTMP blip, app put to background) renews the TTL and is allowed.
+	// Skipped when no cache is wired or SRS forgot to send a client_id.
+	if h.cache != nil && p.ClientID != "" {
+		rds := h.cache.Client()
+		key := "live:publisher:" + p.Stream
+		// Try to claim the slot; if it exists, fetch and compare.
+		setOK, err := rds.SetNX(ctx, key, p.ClientID, publisherLockTTL).Result()
+		if err == nil && !setOK {
+			existing, gerr := rds.Get(ctx, key).Result()
+			if gerr == nil && existing != p.ClientID {
+				slog.Default().Warn("srs: duplicate publisher rejected — possible stream hijack",
+					"stream", p.Stream, "existing_client", existing, "new_client", p.ClientID, "ip", p.IP)
+				deny(c, 1)
+				return
+			}
+			// Same client reconnecting — extend the lease.
+			_ = rds.Expire(ctx, key, publisherLockTTL).Err()
+		}
+	}
+	_ = h.repo.MarkLive(ctx, p.Stream)
 	ok(c)
 }
 
@@ -145,7 +194,22 @@ func (h *Handler) onUnpublish(c *gin.Context) {
 		ok(c)
 		return
 	}
-	_ = h.repo.EndByChannel(c.Request.Context(), p.Stream)
+	ctx := c.Request.Context()
+	// Release the publisher lock only if the unpublishing client is the
+	// one currently holding it. Otherwise an attacker's spurious
+	// on_unpublish from a denied attempt could free the slot for the
+	// next hijack try.
+	if h.cache != nil && p.ClientID != "" {
+		rds := h.cache.Client()
+		key := "live:publisher:" + p.Stream
+		existing, err := rds.Get(ctx, key).Result()
+		if err == nil && existing == p.ClientID {
+			_ = rds.Del(ctx, key).Err()
+		} else if err != nil && err != redis.Nil {
+			slog.Default().Warn("srs: publisher lock lookup failed", "err", err)
+		}
+	}
+	_ = h.repo.EndByChannel(ctx, p.Stream)
 	ok(c)
 }
 

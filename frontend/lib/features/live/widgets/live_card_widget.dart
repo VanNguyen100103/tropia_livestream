@@ -657,15 +657,23 @@ class _LivePreviewVideoState extends State<_LivePreviewVideo> {
             errorWidget: (_, __, ___) => widget.gradientFallback(),
           ),
           if (kIsWeb && _visible)
-            // hls.js-backed muted autoplay loop. Browser autoplay policy
+            // hls.js-backed muted autoplay preview. Browser autoplay policy
             // allows muted videos to start without a user gesture.
+            //
+            // loop is intentionally FALSE: a live stream never "ends" so
+            // looping is meaningless for it, but the moment the host stops,
+            // SRS finalizes the playlist with #EXT-X-ENDLIST and only a
+            // couple of segments (0.ts, 1.ts). With loop:true the <video>
+            // would replay those forever, hammering the proxy with an
+            // endless 0.ts→1.ts→0.ts re-fetch loop. loop:false lets the
+            // preview stop on the last frame once the stream is over.
             HlsViewerWeb(
               key: ValueKey('card-${widget.hlsUrl}'),
               hlsUrl: widget.hlsUrl,
               fit: BoxFit.cover,
               autoplay: true,
               muted: true,
-              loop: true,
+              loop: false,
               posterUrl: widget.posterUrl,
             )
           else if (!kIsWeb && _ready && !_failed && _ctrl != null)

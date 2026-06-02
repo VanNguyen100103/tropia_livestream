@@ -56,4 +56,24 @@ class AppConfig {
       String.fromEnvironment('PLACEHOLDER_IMAGE_BASE_URL', defaultValue: 'https://picsum.photos');
 
   static String get placeholderImageBase => _envPlaceholderBase;
+
+  /// Resolves a possibly-relative backend URL to an absolute one. The
+  /// live API returns HLS playlist URLs as path-only strings (e.g.
+  /// `/api/live/streams/<id>/hls/playlist.m3u8`) so the SRS stream_key
+  /// never appears in any URL a viewer can copy from DevTools — the
+  /// backend now proxies HLS through itself. Media stacks (hls.js,
+  /// video_player) need an absolute URL, so we prepend the configured
+  /// backend host here. Absolute URLs pass through unchanged so we
+  /// don't break anything else that already builds a full URL.
+  static String resolveBackendUrl(String maybeRelative) {
+    if (maybeRelative.isEmpty) return '';
+    if (maybeRelative.startsWith('http://') ||
+        maybeRelative.startsWith('https://')) {
+      return maybeRelative;
+    }
+    final base =
+        backendUrl.endsWith('/') ? backendUrl.substring(0, backendUrl.length - 1) : backendUrl;
+    final tail = maybeRelative.startsWith('/') ? maybeRelative : '/$maybeRelative';
+    return '$base$tail';
+  }
 }

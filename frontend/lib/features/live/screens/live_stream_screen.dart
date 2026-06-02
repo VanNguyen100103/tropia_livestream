@@ -58,11 +58,29 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
     _bootstrap();
   }
 
+  /// The backend now returns the HLS URL as a path-only string (e.g.
+  /// `/api/live/streams/<id>/hls/playlist.m3u8`) so the SRS stream_key
+  /// never appears anywhere a viewer can see in DevTools. Resolve it
+  /// against [AppConfig.backendUrl] for the platform's media stack —
+  /// hls.js on web and video_player on mobile both require an absolute
+  /// URL.
+  String _resolveHlsUrl(String hls) {
+    if (hls.isEmpty) return '';
+    if (hls.startsWith('http://') || hls.startsWith('https://')) {
+      return hls;
+    }
+    final base = AppConfig.backendUrl.endsWith('/')
+        ? AppConfig.backendUrl.substring(0, AppConfig.backendUrl.length - 1)
+        : AppConfig.backendUrl;
+    final tail = hls.startsWith('/') ? hls : '/$hls';
+    return '$base$tail';
+  }
+
   Future<void> _bootstrap() async {
     try {
       final res = await LiveRepository.instance.fetchPlayback(widget.streamId);
       final playback = res['playback'] as Map<String, dynamic>;
-      final hls = (playback['hls'] as String?) ?? '';
+      final hls = _resolveHlsUrl((playback['hls'] as String?) ?? '');
 
       // joinAsViewer is handled inside openStream (it does WS-connect →
       // POST /join → /stats refresh in the right order so the first
@@ -112,7 +130,7 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
     try {
       final res = await LiveRepository.instance.fetchPlayback(widget.streamId);
       final playback = res['playback'] as Map<String, dynamic>;
-      final hls = (playback['hls'] as String?) ?? '';
+      final hls = _resolveHlsUrl((playback['hls'] as String?) ?? '');
       if (!mounted) return;
       if (hls.isEmpty) {
         // Session likely ended or SRS dropped the publisher. Surface the

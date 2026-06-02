@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/tropia/backend/internal/ai"
+	"github.com/tropia/backend/internal/audit"
 	"github.com/tropia/backend/internal/auth"
 	"github.com/tropia/backend/internal/cache"
 	"github.com/tropia/backend/internal/catalog"
@@ -128,19 +129,30 @@ func main() {
 	prodRepo := catalog.NewProductRepository(db)
 	sessRepo := live.NewSessionRepository(db)
 	liveEventsRepo := live.NewEventRepository(db)
+	muteRepo := live.NewChatMuteRepository(db)
 	cartRepo := commerce.NewCartRepository(db)
 	orderRepo := commerce.NewOrderRepository(db)
 	cpnRepo := commerce.NewCouponRepository(db)
+	auditRepo := audit.NewRepository(db)
 
 	// Services — wired with the event bus so writes publish to Redis Streams
 	// for the worker binary to pick up.
 	authSvc := auth.NewAuthService(authRepo, jwtSvc, rds, cc).WithEvents(bus)
+	tokenSigner, err := live.NewTokenSignerFromJSON(cfg.SRSTokenKeysJSON, cfg.SRSTokenCurrentKid, cfg.SRSTokenTTL)
+	if err != nil {
+		log.Fatalf("token signer: %v (check SRS_TOKEN_KEYS_JSON / SRS_TOKEN_CURRENT_KID)", err)
+	}
+	if tokenSigner.Enabled() {
+		log.Printf("token signer: ENABLED (current kid=%s, ttl=%s)", cfg.SRSTokenCurrentKid, cfg.SRSTokenTTL)
+	} else {
+		log.Printf("token signer: disabled (SRS_TOKEN_KEYS_JSON empty — publish/playback URLs are unsigned)")
+	}
 	liveSvc := live.NewService(nil, live.ServiceConfig{
 		RTMPHost: cfg.SRSRtmpHost,
 		HLSHost:  cfg.SRSHlsHost,
 		WHIPHost: cfg.SRSWhipHost,
 		SRTPort:  10080,
-	})
+	}).WithTokenSigner(tokenSigner)
 	orderSvc := commerce.NewOrderService(db, orderRepo, cartRepo, cpnRepo, cc).
 		WithEvents(bus).
 		WithBuyerLookup(authBuyerLookup{repo: authRepo})
@@ -251,10 +263,35 @@ func main() {
 	googleOAuth.Register(router.Group("/api/auth"))
 
 	// Live
+	// Stream-key provider selection. "local" generates a random key in
+	// process; "infra" calls the infra team's stream registry so they
+	// can revoke / audit. Production should run "infra" — see
+	// docs/SECURITY.md for the API contract.
+	var streamKeyProvider live.StreamKeyProvider = live.NewLocalStreamKeyProvider()
+	if cfg.StreamKeyProvider == "infra" {
+		streamKeyProvider = live.NewInfraStreamKeyProvider(
+			cfg.InfraStreamAPIBase,
+			cfg.InfraStreamAPIKey,
+			live.NewLocalStreamKeyProvider(),
+			cfg.StreamKeyProviderAllowFallback,
+		)
+		log.Printf("stream key provider: infra (base=%s, fallback=%v)",
+			cfg.InfraStreamAPIBase, cfg.StreamKeyProviderAllowFallback)
+		if gin.Mode() == gin.ReleaseMode && !cfg.StreamKeyProviderAllowFallback &&
+			(cfg.InfraStreamAPIBase == "" || cfg.InfraStreamAPIKey == "") {
+			log.Fatalf("STREAM_KEY_PROVIDER=infra requires INFRA_STREAM_API_URL and INFRA_STREAM_API_KEY in release mode")
+		}
+	} else {
+		log.Printf("stream key provider: local")
+	}
+
 	liveH := live.NewHandler(liveSvc, sessRepo, cc).
 		WithAI(deepseek).
 		WithCoupons(cpnRepo).
-		WithEvents(liveEventsRepo)
+		WithEvents(liveEventsRepo).
+		WithStreamKeyProvider(streamKeyProvider).
+		WithAudit(auditRepo).
+		WithMuteRepo(muteRepo)
 	liveH.Register(router.Group("/api/live"), authMw, sellerMw)
 
 	// AI endpoints (DeepSeek-backed) on top of live sessions
@@ -264,7 +301,8 @@ func main() {
 	// SRS webhooks
 	srsH := srs.NewHandler(sessRepo).
 		WithEvents(bus).
-		WithSecret(os.Getenv("SRS_WEBHOOK_SECRET"))
+		WithSecret(os.Getenv("SRS_WEBHOOK_SECRET")).
+		WithCache(cc)
 	if gin.Mode() == gin.ReleaseMode && os.Getenv("SRS_WEBHOOK_SECRET") == "" {
 		log.Fatalf("SRS_WEBHOOK_SECRET must be set in release mode (webhook would accept forged on_publish/on_dvr otherwise)")
 	}

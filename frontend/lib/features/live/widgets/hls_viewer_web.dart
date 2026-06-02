@@ -19,6 +19,12 @@ external HlsJs? get _hlsCtor;
 @JS('Hls.isSupported')
 external bool _hlsIsSupported();
 
+// @JS('Hls') binds the factory below to the real global `Hls` constructor
+// (window.Hls, loaded by index.html). Without it the extension type's name
+// `HlsJs` is used verbatim → `new HlsJs(...)` → "dart.global.HlsJs is not a
+// constructor" at runtime. This stayed latent until engine selection started
+// actually routing Chrome to hls.js (it used to fall through to native HLS).
+@JS('Hls')
 extension type HlsJs._(JSObject _) implements JSObject {
   external factory HlsJs([JSObject? config]);
   external void loadSource(String url);
@@ -97,6 +103,37 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
   // While true, the UI shows "Đang kết nối live..." instead of an error
   // even on transient load failures — same reason as above.
   bool _waitingForFirstManifest = true;
+  // hls.js is a <script> in index.html. On a cold navigation the buyer
+  // can reach a live room before that script finishes evaluating, so the
+  // `window.Hls` global (_hlsCtor) is briefly null. Falling straight back
+  // to native <video src=…> there means Chrome fires ONE un-demuxable
+  // .m3u8 request → <video>.onError → the buyer is stranded on "Lỗi phát
+  // video" until they mash Thử lại. That's the cold-start black screen
+  // reported. Instead poll for the global up to ~3s (15 × 200ms) before
+  // conceding to native (genuinely blocked / offline CDN / SRI mismatch).
+  int _hlsScriptWaits = 0;
+  static const int _hlsScriptWaitBudget = 50; // ~10s (50 × 200ms)
+  Timer? _hlsScriptWaitTimer;
+  // <video> element error recovery. The DOM media element can fire
+  // `error` for transient reasons — MSE attached before SRS published the
+  // first segment, a decode hiccup at one of SRS's per-keyframe
+  // discontinuities, a playlist fetch that lost the warmup race. Flipping
+  // to "Lỗi phát video" on the first such event is what forced buyers to
+  // retry by hand. Instead tear down + reattach with backoff up to a
+  // budget; only after that do we surface the error (host really ended).
+  int _videoErrorRecoverTries = 0;
+  static const int _videoErrorRecoverBudget = 5;
+  Timer? _videoErrorRecoverTimer;
+  // Which playback engine _attach() last chose. The <video>.onError
+  // recovery below is ONLY valid on the native/Safari path: there hls.js
+  // isn't driving, so a media error genuinely needs a Dart-side reattach.
+  // On the hls.js path (Chrome/Edge/Firefox) hls.js owns error handling
+  // and re-emits via hlsError — letting <video>.onError reattach too races
+  // `_hls` (null during cold-start AND mid-_reattach, when _video.load()
+  // on an emptied src fires its OWN error) and self-sustains an
+  // error→reattach→error loop: the "reload 4 lần" flicker. We gate on this
+  // stable flag instead of `_hls != null`, which flips to null mid-reattach.
+  bool _usingNativeHls = false;
 
   @override
   void initState() {
@@ -151,13 +188,40 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
       if (_waitingForFirstManifest) {
         setState(() => _waitingForFirstManifest = false);
       }
-      // Recovered from cold start — reset the retry counter so the
+      // Recovered from cold start — reset the retry counters so the
       // next transient segment 404 (which will happen eventually as
       // SRS rotates segments) gets a fresh budget.
       _manifestRetries = 0;
+      _videoErrorRecoverTries = 0;
     });
     _video.onError.listen((_) {
       if (!mounted) return;
+      // hls.js path (Chrome/Edge/Firefox): ignore <video> errors entirely.
+      // hls.js monitors the media element itself and re-emits failures via
+      // `hlsError` (mediaError → recoverMediaError, networkError →
+      // startLoad, transient seg/level → bounded retry) — all of which keep
+      // the existing MediaSource buffering. Reattaching from here is both
+      // redundant and destructive: it tears hls.js down + rebuilds from
+      // scratch (poster/spinner flash), and because _video.load() on the
+      // emptied src fires its own error while _hls is transiently null, it
+      // self-sustains an error→reattach→error loop — the "reload 4 lần"
+      // flicker. Only the native/Safari path (no hls.js) reattaches below.
+      if (!_usingNativeHls) return;
+      // Auto-recover instead of immediately surfacing the error. A media
+      // element error mid-stream (a decode hiccup at an SRS discontinuity)
+      // should rebuild the player, not dump the buyer on a manual "Thử
+      // lại" button. Bounded so a stream the host actually ended still
+      // resolves to the error UI after ~10s. _reattach keeps the
+      // "Đang kết nối live..." spinner up rather than flashing the error.
+      if (_videoErrorRecoverTries < _videoErrorRecoverBudget) {
+        _videoErrorRecoverTries++;
+        _videoErrorRecoverTimer?.cancel();
+        _videoErrorRecoverTimer = Timer(const Duration(seconds: 2), () {
+          if (!mounted) return;
+          _reattach(resetVideoBudget: false);
+        });
+        return;
+      }
       setState(() => _error = 'Lỗi phát video');
       widget.onError?.call();
     });
@@ -205,11 +269,25 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
   // Full teardown + reconnect. Used when the tab was hidden long enough
   // for SRS to have purged the segments we held, or after any fatal hls.js
   // error. Clears _error so the UI flips back to the player widget.
-  void _reattach() {
+  void _reattach({bool resetVideoBudget = true}) {
     if (!mounted) return;
     _mediaRecoverTries = 0;
     _networkRecoverTries = 0;
     _manifestRetries = 0;
+    // The <video>-error budget is deliberately NOT reset when the reattach
+    // was itself triggered by a <video> error (resetVideoBudget=false) —
+    // otherwise a dead stream loops reattach→error→reattach forever. It's
+    // reset on genuine playback (onPlaying) and on user / visibility-driven
+    // reattaches, which is what the default true covers.
+    if (resetVideoBudget) _videoErrorRecoverTries = 0;
+    _videoErrorRecoverTimer?.cancel();
+    _videoErrorRecoverTimer = null;
+    // Fresh attach → fresh poll allowance for the hls.js global. Bounded
+    // overall by the video-error budget above, so an absent CDN can't
+    // loop forever.
+    _hlsScriptWaits = 0;
+    _hlsScriptWaitTimer?.cancel();
+    _hlsScriptWaitTimer = null;
     _manifestRetryTimer?.cancel();
     _manifestRetryTimer = null;
     // Treat the reattach itself as a fresh cold-start, so the loading
@@ -229,22 +307,82 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
 
   void _attach() {
     final canNative = _video.canPlayType('application/vnd.apple.mpegurl').isNotEmpty;
-    // Safari / iOS: native HLS works, skip hls.js.
+    final scriptLoaded = _hlsCtor != null;
+    final hlsUsable = scriptLoaded && _hlsIsSupported();
+
+    // ENGINE SELECTION — order matters. We prefer hls.js wherever it can run
+    // and only fall back to the browser's native HLS when hls.js genuinely
+    // can't (iOS Safari: no MSE).
+    //
+    // Why not trust canNative first? Recent Chrome / Edge on desktop report
+    // canPlayType('application/vnd.apple.mpegurl') = "maybe" (canNative=true)
+    // even though they CANNOT demux the MPEG-TS segments SRS produces.
+    // Pointing _video.src at the playlist there plays nothing, fires
+    // <video>.onError on the first segment, and — because the native path
+    // sets _usingNativeHls=true — drives an endless reattach loop: the
+    // "reload thumbnail 4 lần" flicker the user hit. So canNative is NOT
+    // sufficient evidence that native playback works; hls.js wins when usable.
+
+    // 1. hls.js usable (Chrome / Edge / Firefox / macOS Safari) → use it.
+    if (hlsUsable) {
+      _usingNativeHls = false;
+      _hlsScriptWaits = 0;
+      _attachHlsJs();
+      return;
+    }
+
+    // 2. hls.js library evaluated but unusable (no MSE — iOS Safari). Native
+    //    HLS is the real engine here; mark it so <video>.onError can drive
+    //    reattach recovery (there's no hls.js to recover instead).
+    if (scriptLoaded) {
+      if (canNative) {
+        _usingNativeHls = true;
+        _video.src = widget.hlsUrl;
+        return;
+      }
+      _usingNativeHls = false;
+      if (mounted && _error == null) {
+        setState(() => _error = 'Trình duyệt không hỗ trợ phát video.');
+        widget.onError?.call();
+      }
+      return;
+    }
+
+    // 3. hls.js <script> hasn't finished evaluating yet (cold navigation).
+    //    Poll for it before doing anything — crucially do NOT fall back to
+    //    native here even when canNative is true, because on Chrome that
+    //    "native" path can't actually decode and would strand the viewer.
+    //    The "Đang kết nối live..." spinner is already up so the wait is
+    //    invisible.
+    _usingNativeHls = false;
+    if (_hlsScriptWaits < _hlsScriptWaitBudget) {
+      _hlsScriptWaits++;
+      _hlsScriptWaitTimer?.cancel();
+      _hlsScriptWaitTimer = Timer(const Duration(milliseconds: 200), () {
+        if (!mounted || _hls != null) return;
+        _attach();
+      });
+      return;
+    }
+    // hls.js never showed up after the wait. Last resort: native if the
+    // browser genuinely claims it (covers a native-capable browser whose
+    // hls.js CDN is blocked), else surface a clear error.
     if (canNative) {
+      _usingNativeHls = true;
       _video.src = widget.hlsUrl;
       return;
     }
-    // Other browsers: need hls.js loaded by index.html. If the global is
-    // missing (offline, blocked CDN) fall back to native and let the
-    // browser report the same DEMUXER error we used to see.
-    if (_hlsCtor == null || !_hlsIsSupported()) {
-      // hls.js missing (offline, blocked CDN). Native HLS will fail on
-      // Chrome but that's the same state we had before this widget.
-      // ignore: avoid_print
-      print('[HlsViewerWeb] hls.js not available — falling back to native');
-      _video.src = widget.hlsUrl;
-      return;
+    // ignore: avoid_print
+    print('[HlsViewerWeb] hls.js unavailable after wait — CDN blocked?');
+    if (mounted && _error == null) {
+      setState(() => _error = 'Không tải được trình phát video.');
+      widget.onError?.call();
     }
+  }
+
+  // Builds + attaches the hls.js engine. Split out of _attach so the engine-
+  // selection logic above stays readable; only reached when hls.js is usable.
+  void _attachHlsJs() {
     final hls = HlsJs(
       {
         // Live tuning, smoothness > latency. Trades ~5s extra glass-to-glass
@@ -407,6 +545,10 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
     _visibilitySub = null;
     _manifestRetryTimer?.cancel();
     _manifestRetryTimer = null;
+    _hlsScriptWaitTimer?.cancel();
+    _hlsScriptWaitTimer = null;
+    _videoErrorRecoverTimer?.cancel();
+    _videoErrorRecoverTimer = null;
     try { _hls?.destroy(); } catch (_) {}
     _hls = null;
     try { _video.pause(); } catch (_) {}
@@ -480,24 +622,48 @@ class _HlsViewerWebState extends State<HlsViewerWeb> {
             ),
           ),
           if (_waitingForFirstManifest)
-            Container(
-              color: Colors.black,
-              alignment: Alignment.center,
-              child: const Column(
-                mainAxisSize: MainAxisSize.min,
+            // Cold-start overlay. Show the POSTER (not an opaque black box)
+            // behind the spinner so the connecting state is visually
+            // continuous with the card's own poster underneath. Previously
+            // this was solid black, so the cold-start sequence read as
+            // "thumbnail → black loading → thumbnail → live" — the thumbnail
+            // appeared to vanish and come back. With the poster here the
+            // user sees one steady image + a spinner until the first frame.
+            Positioned.fill(
+              child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  SizedBox(
-                    width: 36,
-                    height: 36,
-                    child: CircularProgressIndicator(
-                      color: Colors.white70,
-                      strokeWidth: 2.5,
+                  if (widget.posterUrl != null && widget.posterUrl!.isNotEmpty)
+                    Image.network(
+                      widget.posterUrl!,
+                      fit: widget.fit,
+                      errorBuilder: (_, __, ___) =>
+                          const ColoredBox(color: Colors.black),
+                    )
+                  else
+                    const ColoredBox(color: Colors.black),
+                  // Dark scrim keeps the white spinner/text legible over a
+                  // bright poster.
+                  const ColoredBox(color: Color(0x55000000)),
+                  const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 36,
+                          height: 36,
+                          child: CircularProgressIndicator(
+                            color: Colors.white70,
+                            strokeWidth: 2.5,
+                          ),
+                        ),
+                        SizedBox(height: 14),
+                        Text(
+                          'Đang kết nối live...',
+                          style: TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                      ],
                     ),
-                  ),
-                  SizedBox(height: 14),
-                  Text(
-                    'Đang kết nối live...',
-                    style: TextStyle(color: Colors.white70, fontSize: 13),
                   ),
                 ],
               ),

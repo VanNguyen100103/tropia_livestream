@@ -398,7 +398,7 @@ func (s *OrderService) PlaceLiveOrder(ctx context.Context, in PlaceOrderInput) (
 	if in.CouponCode != "" {
 		apply, err := ApplyCoupon(ctx, s.couponRepo, in.CouponCode, in.BuyerID, subtotal)
 		if err != nil {
-			// Surface the validation error (expired / already used / below
+			// Surface the validation error (expired / limit_reached / below
 			// min order / etc.) so the FE can show "voucher không áp dụng
 			// được" instead of silently charging the un-discounted total.
 			return nil, err
@@ -486,7 +486,7 @@ func (s *OrderService) CheckoutCart(ctx context.Context, in CheckoutCartInput) (
 		seen[code] = struct{}{}
 		apply, err := ApplyCoupon(ctx, s.couponRepo, code, in.BuyerID, subtotal)
 		if err != nil {
-			// Surface the validation error (expired / already used / below
+			// Surface the validation error (expired / limit_reached / below
 			// min / not found) so the FE can prompt the buyer to drop the
 			// offending voucher instead of silently charging the un-
 			// discounted amount through MoMo / ZaloPay / VNPay.

@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/tropia/backend/internal/ai"
+	"github.com/tropia/backend/internal/audit"
 	"github.com/tropia/backend/internal/auth"
 	"github.com/tropia/backend/internal/cache"
 	"github.com/tropia/backend/internal/commerce"
@@ -45,10 +46,78 @@ type Handler struct {
 	ai      *ai.DeepSeek               // optional; nil disables the bot
 	coupons *commerce.CouponRepository // optional; nil disables live coupon endpoints
 	hub     *ChatHub                   // process-local WS fan-out for chat
+	// streamKeyProvider issues the SRS channel name for new sessions.
+	// Defaults to a local crypto/rand generator; production swaps in
+	// an infra-backed provider so the infra team can revoke / audit
+	// every key. Never nil — NewHandler installs a local default.
+	streamKeyProvider StreamKeyProvider
+	// audit logs sensitive actions to the audit_log table for
+	// post-incident forensics. Optional — nil disables (handlers
+	// skip the call rather than panic).
+	audit *audit.Repository
+	// muteRepo backs the chat mute / shadow-ban moderation features
+	// (threat 9). Optional — nil disables mute enforcement.
+	muteRepo *ChatMuteRepository
 }
 
 func NewHandler(svc *Service, repo *SessionRepository, c *cache.Cache) *Handler {
-	return &Handler{svc: svc, repo: repo, cache: c, hub: NewChatHub()}
+	return &Handler{
+		svc: svc, repo: repo, cache: c, hub: NewChatHub(),
+		streamKeyProvider: NewLocalStreamKeyProvider(),
+	}
+}
+
+// WithStreamKeyProvider swaps the stream_key source. Use to plug in
+// the infra-managed provider once the contract is finalised. Passing
+// nil is a no-op — the local default stays installed.
+func (h *Handler) WithStreamKeyProvider(p StreamKeyProvider) *Handler {
+	if p != nil {
+		h.streamKeyProvider = p
+	}
+	return h
+}
+
+// WithAudit attaches the audit log repository. Sensitive endpoints
+// (create / end / mute / coupon publish / role change) emit one
+// audit row per action; failure to record is logged but doesn't
+// block the user action.
+func (h *Handler) WithAudit(a *audit.Repository) *Handler {
+	h.audit = a
+	return h
+}
+
+// WithMuteRepo attaches the chat-mute repository. Without it,
+// postChat skips the active-mute check (mutes have no effect) and
+// the auto-mute path is a no-op. Always wire in production.
+func (h *Handler) WithMuteRepo(r *ChatMuteRepository) *Handler {
+	h.muteRepo = r
+	return h
+}
+
+// logAudit is a thin wrapper that avoids the `if h.audit != nil`
+// check at every call site. Pass the request context so a cancelled
+// HTTP request doesn't leave a half-written audit row.
+func (h *Handler) logAudit(ctx context.Context, e audit.Entry) {
+	if h.audit == nil {
+		return
+	}
+	_ = h.audit.Log(ctx, e)
+}
+
+// actorFromContext extracts the caller's identity for the audit row.
+// Returns zero values if the request is unauthenticated — audit
+// still records the event, just with nil actor.
+func actorFromContext(c *gin.Context) (uid *uuid.UUID, role string, ip string) {
+	ip = c.ClientIP()
+	claims, ok := auth.ClaimsFrom(c)
+	if !ok {
+		return nil, "", ip
+	}
+	parsed, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		return nil, string(claims.Role), ip
+	}
+	return &parsed, string(claims.Role), ip
 }
 
 // WithEvents enables host-action audit logging into live_events for
@@ -85,11 +154,33 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc)
 	chatLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{
 		Limit: 30, WindowMs: 60 * 1000, FailClosed: false,
 	})
+	// Per-IP cap on the public list endpoint — bots scraping the active
+	// session list to harvest stream_keys / titles hit this before they
+	// can complete enumeration. 120/min is well above legitimate polling
+	// (the WS push at /ws/list is the real source of truth; HTTP polling
+	// is a fallback) and the 3s cache means real cost stays low.
+	listLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{
+		Limit: 120, WindowMs: 60 * 1000, FailClosed: false,
+	})
+	// Per-seller cap on stream creation — without this, a compromised
+	// seller account could spam thousands of session rows + saturate SRS
+	// publish slots. 10/hour covers legitimate "I clicked the wrong
+	// button" retries with huge headroom.
+	createLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{
+		Limit: 10, WindowMs: 60 * 60 * 1000, FailClosed: false,
+	})
 
-	r.GET("/streams", h.listActive)
+	r.GET("/streams", listLimit, h.listActive)
 	r.GET("/streams/:id", h.getOne)
 	r.GET("/streams/:id/stats", h.getStats)
 	r.GET("/streams/:id/chat", h.listChat)
+	// HLS proxy — viewer-facing URLs that hide the SRS stream_key.
+	// playlist.m3u8 is hit every TARGETDURATION (~2s); the s/:seq.ts
+	// segments are hit ~every 2s × N viewers. No auth: the underlying
+	// session's `status=live` gates access, and the segments themselves
+	// carry no key material.
+	r.GET("/streams/:id/hls/playlist.m3u8", h.hlsManifest)
+	r.GET("/streams/:id/hls/s/*name", h.hlsSegment)
 	// WS upgrade for realtime chat + stats push (per-session).
 	r.GET("/streams/:id/ws/chat", h.chatWS)
 	// WS for platform-wide "list changed" notification — clients on the
@@ -114,7 +205,7 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc)
 	authed.POST("/:id/track-follow", h.trackFollow)
 
 	seller := r.Group("/streams", authMw, sellerMw)
-	seller.POST("", h.create)
+	seller.POST("", createLimit, h.create)
 	seller.POST("/:id/end", h.end)
 	seller.GET("/:id/publish", h.getPublish)
 	seller.PATCH("/:id/bot", h.setBot)
@@ -133,6 +224,11 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc)
 	// Creation already auto-announces, so this is for the "phát lại"
 	// case mid-stream.
 	seller.POST("/:id/coupons/:couponId/announce", h.announceCoupon)
+	// Chat moderation — host can silence a misbehaving viewer for a
+	// configurable duration. Symmetric unmute clears it early. Both
+	// emit audit_log rows so abuse patterns are queryable later.
+	seller.POST("/:id/chat/mute", h.muteChatUser)
+	seller.POST("/:id/chat/unmute", h.unmuteChatUser)
 }
 
 // ---------- Create / End ----------
@@ -152,7 +248,20 @@ func (h *Handler) create(c *gin.Context) {
 		c.Error(httpx.NewValidation(err.Error(), nil))
 		return
 	}
-	channel := generateChannelName()
+	// Stream_key comes from the configured provider — either local
+	// crypto/rand or the infra registry, depending on
+	// STREAM_KEY_PROVIDER. A 5s budget keeps the seller's "Bắt đầu
+	// live" tap responsive even when the infra call is slow; provider
+	// errors propagate to the seller as 503 so they retry rather than
+	// silently get a key infra doesn't recognise.
+	issueCtx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	channel, err := h.streamKeyProvider.Issue(issueCtx, sellerID, 4*time.Hour)
+	if err != nil {
+		slog.Default().Warn("stream key issue failed", "seller", sellerID, "err", err)
+		c.Error(httpx.NewInternal("issue stream key", err))
+		return
+	}
 	sess, err := h.repo.Create(c.Request.Context(), sellerID, req.Title, req.Description, req.CoverImageURL, req.Category, channel)
 	if err != nil {
 		c.Error(httpx.NewInternal("create session", err))
@@ -160,6 +269,18 @@ func (h *Handler) create(c *gin.Context) {
 	}
 	_ = h.cache.InvalidatePattern(c.Request.Context(), "live:sessions:*")
 	h.publishListChange("session_created")
+	uidPtr, role, ip := actorFromContext(c)
+	h.logAudit(c.Request.Context(), audit.Entry{
+		ActorID: uidPtr, ActorRole: role, ActorIP: ip,
+		Action:     audit.ActionLiveSessionCreate,
+		TargetType: audit.TargetLiveSession,
+		TargetID:   sess.ID.String(),
+		Payload: map[string]any{
+			"title":      req.Title,
+			"category":   req.Category,
+			"stream_key": "<redacted>", // path actively redacted — never log the publish credential
+		},
+	})
 	c.JSON(http.StatusCreated, gin.H{
 		"session": sess,
 		"publish": h.svc.BuildPublishURLs(&Stream{StreamKey: channel}),
@@ -194,7 +315,189 @@ func (h *Handler) end(c *gin.Context) {
 	// detect this. Important: do this BEFORE responding so any race
 	// with the host's own UI is minimized.
 	h.publishStatsEvent(id)
+	uidPtr, role, ip := actorFromContext(c)
+	h.logAudit(c.Request.Context(), audit.Entry{
+		ActorID: uidPtr, ActorRole: role, ActorIP: ip,
+		Action:     audit.ActionLiveSessionEnd,
+		TargetType: audit.TargetLiveSession,
+		TargetID:   id.String(),
+		Payload:    map[string]any{"by_admin": claims.Role == auth.RoleAdmin},
+	})
 	c.Status(http.StatusNoContent)
+}
+
+// ---------- Chat moderation (threat 9) ----------
+
+type muteReq struct {
+	UserID          string `json:"user_id" binding:"required,uuid"`
+	DurationSeconds int    `json:"duration_seconds" binding:"required,min=10,max=86400"`
+	Reason          string `json:"reason"`
+}
+
+// muteChatUser — host-driven mute. Hosts can silence a misbehaving
+// viewer for 10s–24h; longer than 24h is rejected to keep the chat
+// mutes table from accumulating stale rows past natural session end.
+// Idempotent: muting an already-muted user extends the duration.
+func (h *Handler) muteChatUser(c *gin.Context) {
+	sessionID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.Error(httpx.NewValidation("invalid session id", nil))
+		return
+	}
+	var req muteReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(httpx.NewValidation(err.Error(), nil))
+		return
+	}
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		c.Error(httpx.NewValidation("invalid user id", nil))
+		return
+	}
+	sess, err := h.repo.GetByID(c.Request.Context(), sessionID)
+	if err != nil {
+		c.Error(httpx.NewNotFound("session not found"))
+		return
+	}
+	claims, _ := auth.ClaimsFrom(c)
+	hostUID, _ := uuid.Parse(claims.UserID)
+	if sess.SellerID != hostUID && claims.Role != auth.RoleAdmin {
+		c.Error(httpx.NewForbidden("not the host"))
+		return
+	}
+	if userID == sess.SellerID {
+		c.Error(httpx.NewValidation("cannot mute the host", nil))
+		return
+	}
+	if h.muteRepo == nil {
+		c.Error(httpx.NewInternal("mute repo not wired", errors.New("muteRepo nil")))
+		return
+	}
+	mutedUntil := time.Now().Add(time.Duration(req.DurationSeconds) * time.Second)
+	if err := h.muteRepo.Mute(c.Request.Context(), sessionID, userID, mutedUntil, MuteReasonHostAction, &hostUID); err != nil {
+		c.Error(httpx.NewInternal("mute user", err))
+		return
+	}
+	uidPtr, role, ip := actorFromContext(c)
+	h.logAudit(c.Request.Context(), audit.Entry{
+		ActorID: uidPtr, ActorRole: role, ActorIP: ip,
+		Action:     audit.ActionChatMute,
+		TargetType: audit.TargetUser,
+		TargetID:   userID.String(),
+		Payload: map[string]any{
+			"session_id":       sessionID.String(),
+			"duration_seconds": req.DurationSeconds,
+			"reason":           req.Reason,
+		},
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"user_id":     userID,
+		"muted_until": mutedUntil,
+	})
+}
+
+type unmuteReq struct {
+	UserID string `json:"user_id" binding:"required,uuid"`
+}
+
+func (h *Handler) unmuteChatUser(c *gin.Context) {
+	sessionID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.Error(httpx.NewValidation("invalid session id", nil))
+		return
+	}
+	var req unmuteReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(httpx.NewValidation(err.Error(), nil))
+		return
+	}
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		c.Error(httpx.NewValidation("invalid user id", nil))
+		return
+	}
+	sess, err := h.repo.GetByID(c.Request.Context(), sessionID)
+	if err != nil {
+		c.Error(httpx.NewNotFound("session not found"))
+		return
+	}
+	claims, _ := auth.ClaimsFrom(c)
+	hostUID, _ := uuid.Parse(claims.UserID)
+	if sess.SellerID != hostUID && claims.Role != auth.RoleAdmin {
+		c.Error(httpx.NewForbidden("not the host"))
+		return
+	}
+	if h.muteRepo == nil {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	if err := h.muteRepo.Unmute(c.Request.Context(), sessionID, userID); err != nil {
+		c.Error(httpx.NewInternal("unmute user", err))
+		return
+	}
+	uidPtr, role, ip := actorFromContext(c)
+	h.logAudit(c.Request.Context(), audit.Entry{
+		ActorID: uidPtr, ActorRole: role, ActorIP: ip,
+		Action:     audit.ActionChatUnmute,
+		TargetType: audit.TargetUser,
+		TargetID:   userID.String(),
+		Payload:    map[string]any{"session_id": sessionID.String()},
+	})
+	c.Status(http.StatusNoContent)
+}
+
+// autoMuteOnFilter applies a short timeout when the chat filter
+// rejects a message outright (scam phrase blocklist hit). Idempotent
+// via Mute's UPSERT — repeat offences extend rather than stack rows.
+// Failures are logged but don't block the user's 400 response (the
+// rejection is the primary defence; the mute is icing).
+func (h *Handler) autoMuteOnFilter(ctx context.Context, sessionID, userID uuid.UUID, reason MuteReason, duration time.Duration) {
+	if h.muteRepo == nil {
+		return
+	}
+	until := time.Now().Add(duration)
+	if err := h.muteRepo.Mute(ctx, sessionID, userID, until, reason, nil); err != nil {
+		slog.Default().Warn("auto-mute failed", "session", sessionID, "user", userID, "err", err)
+		return
+	}
+	h.logAudit(ctx, audit.Entry{
+		Action:     audit.ActionChatAutoMute,
+		TargetType: audit.TargetUser,
+		TargetID:   userID.String(),
+		Payload: map[string]any{
+			"session_id":       sessionID.String(),
+			"reason":           string(reason),
+			"duration_seconds": int(duration.Seconds()),
+		},
+	})
+}
+
+// autoMuteBurstThreshold caps how many masked-URL messages we'll let
+// a viewer post in autoMuteBurstWindow before timing them out. The
+// counter lives in Redis (sliding window) so it survives API restarts
+// without us needing schema for it.
+const (
+	autoMuteBurstThreshold = 3
+	autoMuteBurstWindow    = 5 * time.Minute
+	autoMuteBurstDuration  = 5 * time.Minute
+)
+
+// autoMuteIfBurst checks how many times this user has tripped the
+// URL mask in the last autoMuteBurstWindow. Past the threshold, we
+// promote to a real mute. Implementation reuses cache.Allow as a
+// counter: the limit is intentionally set to the threshold so the
+// FIRST denied call signals "burst exceeded". Failures degrade
+// silently — the worst case is a missed auto-mute, not a wrongful one.
+func (h *Handler) autoMuteIfBurst(ctx context.Context, sessionID, userID uuid.UUID) {
+	if h.cache == nil {
+		return
+	}
+	key := "chat:burst:" + sessionID.String() + ":" + userID.String()
+	allowed, err := h.cache.Allow(ctx, key, autoMuteBurstThreshold, autoMuteBurstWindow.Milliseconds(), false)
+	if err != nil || allowed {
+		return
+	}
+	h.autoMuteOnFilter(ctx, sessionID, userID, MuteReasonAutoSpamBurst, autoMuteBurstDuration)
 }
 
 // ---------- Lists / Single ----------
@@ -208,46 +511,151 @@ type sessionWithPreview struct {
 	Products    []SessionProduct `json:"products,omitempty"`
 }
 
+// listResponse couples the page of sessions with the cursor for the
+// next page. `next_cursor` is null when there are no more rows;
+// clients walking the list should keep calling with the returned
+// cursor until they see null.
+type listResponse struct {
+	Sessions   []sessionWithPreview `json:"sessions"`
+	NextCursor *string              `json:"next_cursor"`
+}
+
+// scraperRequestQuota is the per-IP cap on /streams calls in
+// scraperRequestWindow. Threat 7 — DB scraping. The short-window
+// limit (120/min) already exists; this is the LONG-window backstop
+// against a bot that paces requests under the short limit but keeps
+// going for hours. 600 requests / 10 minutes = 1 every second
+// sustained; honest viewers don't poll that fast even on the worst
+// network. Past the limit we log + return 429 (caught here, not by
+// the middleware, so we can emit a structured audit row).
+const (
+	scraperRequestQuota  = 600
+	scraperRequestWindow = 10 * time.Minute
+)
+
 func (h *Handler) listActive(c *gin.Context) {
 	ctx := c.Request.Context()
+	// Long-window scraper detection. Fail-open on Redis hiccups —
+	// it's a defence-in-depth layer; the 3s cache + 120/min short
+	// limiter remain primary.
+	if h.cache != nil {
+		ip := c.ClientIP()
+		key := "scraper:streams:" + ip
+		allowed, err := h.cache.Allow(ctx, key, scraperRequestQuota, scraperRequestWindow.Milliseconds(), false)
+		if err == nil && !allowed {
+			slog.Default().Warn("possible scraper — long-window quota exceeded",
+				"endpoint", "/api/live/streams", "ip", ip, "quota", scraperRequestQuota, "window", scraperRequestWindow)
+			h.logAudit(ctx, audit.Entry{
+				ActorIP:    ip,
+				Action:     "abuse.scraper_detected",
+				TargetType: "endpoint",
+				TargetID:   "/api/live/streams",
+				Payload: map[string]any{
+					"quota":  scraperRequestQuota,
+					"window": scraperRequestWindow.String(),
+				},
+			})
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error": "too many requests — please slow down",
+				"code":  "SCRAPER_BLOCKED",
+			})
+			return
+		}
+	}
+
+	// Parse cursor — format "<unix_milli>:<uuid>". Empty means first
+	// page. Malformed cursor falls back to first page so a bad
+	// bookmark doesn't hard-fail the whole tab.
+	cursorTime, cursorID := parseListCursor(c.Query("cursor"))
+	limit := 50
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+
 	// Cache-aside: 3s TTL is short enough that newly-started streams
 	// show up within one Flutter poll cycle (15s) and ended streams
 	// disappear quickly, but long enough to coalesce the polling burst
-	// from 200+ concurrent viewers onto one DB read every 3s.
-	out, err := cache.Aside(ctx, h.cache, "live:sessions:active", 3*time.Second,
-		func(ctx context.Context) ([]sessionWithPreview, error) {
-			sessions, err := h.repo.ListActive(ctx, 50)
-			if err != nil {
-				return nil, err
+	// from 200+ concurrent viewers onto one DB read every 3s. Cursor
+	// pages are NOT cached (the first-page cache key collides with
+	// itself across cursor values otherwise); only the unparameterised
+	// first page uses the cache.
+	useCache := cursorTime.IsZero() && limit == 50
+	loadPage := func(ctx context.Context) ([]sessionWithPreview, error) {
+		sessions, err := h.repo.ListActiveCursor(ctx, limit, cursorTime, cursorID)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]uuid.UUID, len(sessions))
+		for i, s := range sessions {
+			ids[i] = s.ID
+		}
+		productsBySession, perr := h.repo.ListProductsForSessions(ctx, ids)
+		if perr != nil {
+			slog.Default().Warn("list active: batch products lookup failed", "err", perr)
+			productsBySession = map[uuid.UUID][]SessionProduct{}
+		}
+		out := make([]sessionWithPreview, len(sessions))
+		for i, s := range sessions {
+			urls := h.svc.BuildPlaybackURLs(&Stream{ID: s.ID, StreamKey: s.StreamKey})
+			s.StreamKey = ""
+			out[i] = sessionWithPreview{
+				Session:     s,
+				PlaybackHLS: urls.HLS,
+				Products:    productsBySession[s.ID],
 			}
-			// Batch-fetch pinned products in ONE query (was N+1 — 51
-			// queries for 50 streams; now 2 total).
-			ids := make([]uuid.UUID, len(sessions))
-			for i, s := range sessions {
-				ids[i] = s.ID
-			}
-			productsBySession, perr := h.repo.ListProductsForSessions(ctx, ids)
-			if perr != nil {
-				slog.Default().Warn("list active: batch products lookup failed", "err", perr)
-				productsBySession = map[uuid.UUID][]SessionProduct{}
-			}
-			out := make([]sessionWithPreview, len(sessions))
-			for i, s := range sessions {
-				urls := h.svc.BuildPlaybackURLs(&Stream{StreamKey: s.StreamKey})
-				s.StreamKey = ""
-				out[i] = sessionWithPreview{
-					Session:     s,
-					PlaybackHLS: urls.HLS,
-					Products:    productsBySession[s.ID],
-				}
-			}
-			return out, nil
-		})
+		}
+		return out, nil
+	}
+	var out []sessionWithPreview
+	var err error
+	if useCache {
+		out, err = cache.Aside(ctx, h.cache, "live:sessions:active", 3*time.Second, loadPage)
+	} else {
+		out, err = loadPage(ctx)
+	}
 	if err != nil {
 		c.Error(httpx.NewInternal("list active", err))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"sessions": out})
+	// Build next_cursor from the last row. If we returned fewer than
+	// `limit` rows there's no next page.
+	var next *string
+	if len(out) == limit && len(out) > 0 {
+		last := out[len(out)-1]
+		if last.StartedAt != (time.Time{}) {
+			c := formatListCursor(last.StartedAt, last.ID)
+			next = &c
+		}
+	}
+	c.JSON(http.StatusOK, listResponse{Sessions: out, NextCursor: next})
+}
+
+// parseListCursor decodes the "<unix_milli>:<uuid>" cursor format
+// the listResponse emits. Anything malformed → zero values, which
+// callers treat as "no cursor — first page".
+func parseListCursor(raw string) (time.Time, uuid.UUID) {
+	if raw == "" {
+		return time.Time{}, uuid.Nil
+	}
+	parts := strings.SplitN(raw, ":", 2)
+	if len(parts) != 2 {
+		return time.Time{}, uuid.Nil
+	}
+	ms, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, uuid.Nil
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return time.Time{}, uuid.Nil
+	}
+	return time.UnixMilli(ms), id
+}
+
+func formatListCursor(t time.Time, id uuid.UUID) string {
+	return strconv.FormatInt(t.UnixMilli(), 10) + ":" + id.String()
 }
 
 func (h *Handler) getOne(c *gin.Context) {
@@ -277,7 +685,7 @@ func (h *Handler) getPlayback(c *gin.Context) {
 		c.Error(httpx.NewNotFound("session not found"))
 		return
 	}
-	playback := h.svc.BuildPlaybackURLs(&Stream{StreamKey: sess.StreamKey})
+	playback := h.svc.BuildPlaybackURLs(&Stream{ID: sess.ID, StreamKey: sess.StreamKey})
 	sess.StreamKey = ""
 	c.JSON(http.StatusOK, gin.H{"session": sess, "playback": playback})
 }
@@ -461,6 +869,46 @@ func (h *Handler) postChat(c *gin.Context) {
 	}
 	username, avatar := h.repo.LookupProfile(ctx, uid)
 	isHostFlag := sess.SellerID == uid
+	// Active-mute gate (threat 9). Host bypasses for the same reason
+	// they bypass the URL filter — their own moderation tool can't be
+	// turned against them. Muted users receive a 403 with the reason
+	// + remaining duration so the client can surface a polite UI.
+	if !isHostFlag && h.muteRepo != nil {
+		if info, err := h.muteRepo.ActiveMute(ctx, id, uid); err == nil && info != nil {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":       "bạn đang bị tạm khoá chat",
+				"reason":      string(info.Reason),
+				"muted_until": info.MutedUntil,
+				"code":        "MUTED",
+			})
+			c.Abort()
+			return
+		}
+	}
+	// Threat 9 — scam-link / off-platform-payment filter. Host is
+	// exempt because sellers legitimately paste their own shop URL.
+	// Buyers who post a blocked phrase (e.g. "chuyển khoản trước",
+	// "add zalo") are rejected; benign URLs are masked so the rest of
+	// the message still gets through.
+	if !isHostFlag {
+		sanitized, blocked := FilterChatMessage(req.Message)
+		if blocked {
+			// Auto-mute on outright rejection so a spammer can't
+			// keep pounding the endpoint — 60s mute escalates per
+			// repeat offence via the GREATEST() upsert in ChatMuteRepository.
+			h.autoMuteOnFilter(ctx, id, uid, MuteReasonAutoScam, 60*time.Second)
+			c.Error(httpx.NewValidation("tin nhắn chứa nội dung không được phép", nil))
+			return
+		}
+		if sanitized != req.Message {
+			// Soft signal — URL was masked. Count toward a sliding
+			// auto-mute heuristic so a viewer spamming masked links
+			// eventually gets timed out instead of continuing to
+			// pollute the chat with `[link bị chặn]` lines.
+			h.autoMuteIfBurst(ctx, id, uid)
+		}
+		req.Message = sanitized
+	}
 	var isHost *bool
 	if isHostFlag {
 		isHost = &isHostFlag
@@ -964,8 +1412,11 @@ type createCouponReq struct {
 	DiscountType  string  `json:"discount_type" binding:"required,oneof=percent fixed"`
 	DiscountValue float64 `json:"discount_value" binding:"required,gt=0"`
 	MinOrderValue float64 `json:"min_order_value"`
-	MaxUses       *int    `json:"max_uses"`
-	ExpiresAt     string  `json:"expires_at" binding:"required"` // ISO 8601
+	// Required (option 1b): per-user dedup was removed, so the total cap
+	// is the only thing bounding coupon abuse. A null max_uses would mean
+	// a single buyer could redeem the same discount on unlimited orders.
+	MaxUses   *int   `json:"max_uses" binding:"required,min=1"`
+	ExpiresAt string `json:"expires_at" binding:"required"` // ISO 8601
 }
 
 // createCoupon — host creates a coupon attached to this live session.
@@ -1024,6 +1475,25 @@ func (h *Handler) createCoupon(c *gin.Context) {
 			"discount_value": coupon.DiscountValue,
 		})
 	}
+	uidPtr, role, ip := actorFromContext(c)
+	maxUsesVal := -1
+	if req.MaxUses != nil {
+		maxUsesVal = *req.MaxUses
+	}
+	h.logAudit(c.Request.Context(), audit.Entry{
+		ActorID: uidPtr, ActorRole: role, ActorIP: ip,
+		Action:     audit.ActionCouponPublish,
+		TargetType: audit.TargetCoupon,
+		TargetID:   coupon.ID.String(),
+		Payload: map[string]any{
+			"session_id":     id.String(),
+			"code":           coupon.Code,
+			"discount_type":  coupon.DiscountType,
+			"discount_value": coupon.DiscountValue,
+			"max_uses":       maxUsesVal,
+			"expires_at":     coupon.ExpiresAt,
+		},
+	})
 	c.JSON(http.StatusCreated, gin.H{"coupon": coupon})
 }
 
@@ -1207,11 +1677,17 @@ func sessDurationSec(s *Session) int {
 
 // ---------- Helpers ----------
 
+// generateChannelName is the legacy in-handler key generator. The
+// active path goes through h.streamKeyProvider (see create()) so we
+// can swap to the infra-managed provider without touching handler
+// code. Kept here for tests and as a documentation breadcrumb.
 func generateChannelName() string {
-	b := make([]byte, 8)
+	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	return "live_" + hex.EncodeToString(b)
 }
+
+var _ = generateChannelName // referenced by tests + kept for legacy callers
 
 // Make ErrSessionNotFound check accessible to other handlers
 func IsNotFound(err error) bool {
