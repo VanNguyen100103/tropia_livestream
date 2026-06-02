@@ -153,7 +153,7 @@ func main() {
 	// Max live-duration cap — force-end sessions running longer than
 	// MAX_LIVE_DURATION (default 4h) so a forgotten/abandoned stream
 	// doesn't stay "live" forever.
-	maxLiveDuration := parseDurEnv("MAX_LIVE_DURATION", 4*time.Hour)
+	maxLiveDuration := parseDurEnv("MAX_LIVE_DURATION", 2*time.Hour)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

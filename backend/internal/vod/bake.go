@@ -101,8 +101,17 @@ func Bake(ctx context.Context, in BakeInput) (string, error) {
 	}
 	videoDuration := time.Duration(endMs) * time.Millisecond
 
-	// 1. Build chat ASS subtitle file.
-	assText := BuildChatASS(in.Chats, in.SessionStart, videoDuration, in.Width, in.Height)
+	// 1. Build chat ASS subtitle file. Gift messages are excluded here —
+	// they're rendered as their own banner overlay (PrepareOverlays) so
+	// they don't appear twice (subtitle + banner).
+	chatsForASS := make([]live.ChatMessage, 0, len(in.Chats))
+	for _, m := range in.Chats {
+		if m.Type == "gift" {
+			continue
+		}
+		chatsForASS = append(chatsForASS, m)
+	}
+	assText := BuildChatASS(chatsForASS, in.SessionStart, videoDuration, in.Width, in.Height)
 	assPath := filepath.Join(in.WorkDir, "chat.ass")
 	if err := os.WriteFile(assPath, []byte(assText), 0o644); err != nil {
 		return "", fmt.Errorf("write ass: %w", err)
@@ -351,6 +360,10 @@ func overlayExpr(typ string) (string, string) {
 		// fight for the same vertical band. `h` here is the product
 		// list PNG height (varies with # of products).
 		return "24", "H*0.30"
+	case "gift":
+		// Bottom-center, above the chat band — a transient celebratory
+		// banner that doesn't permanently occupy a corner.
+		return "(W-w)/2", "H*0.62"
 	}
 	return "24", "24"
 }
@@ -380,6 +393,13 @@ func flattenEvents(events []live.LiveEvent, _ time.Time) []LiveEventLite {
 			}
 		case "bot_toggle":
 			ev.BotEnabled, _ = p["enabled"].(bool)
+		case "gift":
+			ev.GiftSender, _ = p["sender_name"].(string)
+			ev.GiftName, _ = p["gift_name"].(string)
+			ev.GiftCode, _ = p["gift_code"].(string)
+			if v, ok := p["quantity"].(float64); ok {
+				ev.GiftQty = int(v)
+			}
 		}
 		out = append(out, ev)
 	}

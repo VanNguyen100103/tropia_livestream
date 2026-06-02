@@ -29,6 +29,8 @@ const (
 	couponH       = 56
 	botChipW      = 140
 	botChipH      = 44
+	giftW         = 460
+	giftH         = 72
 	defaultFontPx = 22
 )
 
@@ -198,6 +200,71 @@ func RenderCouponBanner(discountType, code string, value float64, outPath string
 	dc.DrawString(code, badgeX+8, badgeY+19)
 
 	return savePNG(dc, outPath)
+}
+
+// RenderGiftBanner draws a pink rounded banner with a left accent disc and
+// two lines: the sender name + "Tặng {n}x {gift}". Burned into the VOD so
+// gifts show as a proper banner in replay (not just a chat subtitle line).
+func RenderGiftBanner(sender, giftName string, qty int, outPath string) error {
+	dc := gg.NewContext(giftW, giftH)
+
+	// Banner body — magenta/pink rounded card.
+	dc.SetRGB255(233, 30, 99)
+	dc.DrawRoundedRectangle(0, 0, float64(giftW), float64(giftH), 18)
+	dc.Fill()
+
+	// Left accent disc.
+	dc.SetRGBA(1, 1, 1, 0.22)
+	dc.DrawCircle(40, float64(giftH)/2, 24)
+	dc.Fill()
+	// A small gift "box" mark inside the disc (two strokes — emoji fonts
+	// aren't guaranteed, so draw a simple glyph).
+	dc.SetRGB(1, 1, 1)
+	dc.SetLineWidth(3)
+	dc.DrawRectangle(28, float64(giftH)/2-6, 24, 16)
+	dc.Stroke()
+	dc.DrawLine(40, float64(giftH)/2-6, 40, float64(giftH)/2+10)
+	dc.Stroke()
+
+	if sender == "" {
+		sender = "Người xem"
+	}
+	if giftName == "" {
+		giftName = "Quà"
+	}
+	if qty <= 0 {
+		qty = 1
+	}
+
+	// Sender (top line).
+	face, err := loadFace(20)
+	if err != nil {
+		return err
+	}
+	dc.SetFontFace(face)
+	dc.SetRGB(1, 1, 1)
+	dc.DrawString(truncateRunes(sender, 22), 80, 30)
+
+	// Gift line (bottom).
+	small, err := loadFace(16)
+	if err != nil {
+		return err
+	}
+	dc.SetFontFace(small)
+	dc.SetRGB255(255, 235, 130) // soft amber
+	dc.DrawString(fmt.Sprintf("Tặng %dx %s", qty, truncateRunes(giftName, 24)), 80, 56)
+
+	return savePNG(dc, outPath)
+}
+
+// truncateRunes shortens s to at most n runes (so Vietnamese diacritics
+// aren't cut mid-character), appending an ellipsis when trimmed.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // ── Product list (carousel mirror) ──────────────────────────────────
@@ -440,6 +507,22 @@ func PrepareOverlays(ctx context.Context, events []LiveEventLite, workDir string
 		assets = append(assets, OverlayAsset{Path: path, Type: "coupon", StartMs: e.StartMs, EndMs: end})
 	}
 
+	// Gifts: each event → a banner shown for 5s.
+	for i, e := range events {
+		if e.Type != "gift" {
+			continue
+		}
+		path := filepath.Join(workDir, fmt.Sprintf("gift_%d.png", i))
+		if err := RenderGiftBanner(e.GiftSender, e.GiftName, e.GiftQty, path); err != nil {
+			return nil, fmt.Errorf("render gift: %w", err)
+		}
+		end := e.StartMs + 5000
+		if end > endMs {
+			end = endMs
+		}
+		assets = append(assets, OverlayAsset{Path: path, Type: "gift", StartMs: e.StartMs, EndMs: end})
+	}
+
 	// Pins: pair up product_pin / product_unpin into spans. If a pin
 	// has no unpin (host ended without unpinning), span runs to endMs.
 	var openPin *LiveEventLite
@@ -522,6 +605,12 @@ type LiveEventLite struct {
 
 	// bot_toggle fields
 	BotEnabled bool
+
+	// gift fields
+	GiftSender string
+	GiftName   string
+	GiftCode   string
+	GiftQty    int
 }
 
 // Silence unused import warnings if color package isn't used elsewhere.

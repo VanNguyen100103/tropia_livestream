@@ -398,6 +398,17 @@ func (h *Handler) specGiftSend(c *gin.Context) {
 		c.Error(httpx.NewInternal("send gift", err))
 		return
 	}
+	// Log a live_event so the VOD bake can burn a gift banner overlay into
+	// the recording (separate from the chat line). Offset is computed from
+	// the session's started_at by LogAsync.
+	if h.events != nil {
+		h.events.LogAsync(sess.SessionUUID(), sess.StartedAt.t, EventGift, map[string]any{
+			"sender_name": gift.SenderName,
+			"gift_name":   gift.GiftName,
+			"gift_code":   gift.GiftCode,
+			"quantity":    gift.Quantity,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"gift":             gift,
 		"points_remaining": remaining,

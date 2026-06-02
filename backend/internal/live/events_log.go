@@ -17,6 +17,7 @@ const (
 	EventProductPin     = "product_pin"
 	EventProductUnpin   = "product_unpin"
 	EventCouponPublish  = "coupon_publish"
+	EventGift           = "gift"
 )
 
 // LiveEvent is one row of live_events. stream_offset_ms is wall-clock
