@@ -52,6 +52,11 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
   late final LiveProvider _provider;
   ViewerUnloadHook? _unloadHook;
 
+  // Poll trạng thái phiên như backstop cho WS (WS có thể rớt) — phát hiện
+  // host kết thúc live kể cả khi WS không đẩy được event.
+  Timer? _statusPoll;
+  bool _ended = false;
+
   // Điều khiển overlay hiệu ứng quà (banner + emoji bay).
   final _giftOverlayKey = GlobalKey<LiveGiftOverlayState>();
 
@@ -110,6 +115,7 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
         _stream = _provider.currentStream;
         _loading = false;
       });
+      _startStatusPoll();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -120,11 +126,29 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
   }
 
   void _handleSessionEnded() {
-    if (!mounted) return;
+    if (!mounted || _ended) return;
+    _ended = true;
+    _statusPoll?.cancel();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Buổi live đã kết thúc')),
     );
     Navigator.of(context).maybePop();
+  }
+
+  // Backstop polling: cứ 5s hỏi /stats; nếu status không còn 'live'
+  // (offline/ended) thì coi như host đã kết thúc — không phụ thuộc WS.
+  void _startStatusPoll() {
+    _statusPoll?.cancel();
+    _statusPoll = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (!mounted || _ended) return;
+      try {
+        final stats = await LiveRepository.instance.fetchSessionStats(widget.streamId);
+        final st = stats['status'];
+        if (st == 'ended' || st == 'offline') {
+          _handleSessionEnded();
+        }
+      } catch (_) {/* lỗi tạm thời — bỏ qua, lần sau thử lại */}
+    });
   }
 
   /// Re-resolve the HLS playback URL before the player rebuilds. Used by
@@ -153,6 +177,7 @@ class _LiveStreamScreenState extends State<LiveStreamScreen> {
 
   @override
   void dispose() {
+    _statusPoll?.cancel();
     _provider.onSessionEnded = null;
     _unloadHook?.dispose();
     _unloadHook = null;
