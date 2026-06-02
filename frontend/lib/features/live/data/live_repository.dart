@@ -180,6 +180,22 @@ class LiveRepository {
     await _dio.post('/api/live/streams/$sessionId/coupons/$couponId/announce');
   }
 
+  /// Fetches a single session by id regardless of status (GET
+  /// /api/live/streams/:id). Used as a fallback when the live-list scan
+  /// misses a freshly-created 'ready' session (on_publish hasn't flipped
+  /// it to 'live' yet) — e.g. the host opening their own stream right
+  /// after live/start. Returns null on failure.
+  Future<Map<String, dynamic>?> fetchSession(String sessionId) async {
+    try {
+      final res = await _dio.get('/api/live/streams/$sessionId');
+      final data = res.data as Map<String, dynamic>;
+      return (data['session'] as Map?)?.cast<String, dynamic>();
+    } catch (e) {
+      AppLogger.logError(_tag, 'fetchSession failed', e, null);
+      return null;
+    }
+  }
+
   /// Fetches playback URLs for a viewer.
   Future<Map<String, dynamic>> fetchPlayback(String sessionId) async {
     final res = await _dio.get('/api/live/streams/$sessionId/playback');

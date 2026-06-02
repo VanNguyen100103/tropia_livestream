@@ -433,6 +433,17 @@ class LiveProvider extends ChangeNotifier {
           }
         } catch (_) {}
       }
+      // Fallback: the live-list only returns status='live' sessions, so a
+      // freshly-created 'ready' session (host opening right after
+      // live/start, before SRS on_publish flips it to live) won't be there.
+      // Fetch it directly by id so the host still subscribes to chat/stats.
+      if (idx == -1) {
+        final one = await LiveRepository.instance.fetchSession(streamId);
+        if (one != null && one.isNotEmpty) {
+          _streams = [..._streams, _rowToLiveStream(one)];
+          idx = _streams.length - 1;
+        }
+      }
       if (idx == -1) {
         AppLogger.logError(_tag, 'openStream: session $streamId not found', null, null);
         return;
