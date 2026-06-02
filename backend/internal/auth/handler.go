@@ -147,7 +147,9 @@ func (h *Handler) register(c *gin.Context) {
 }
 
 type loginReq struct {
-	Email    string `json:"email" binding:"required,email"`
+	// Accept either `username` (SĐT or email) or the legacy `email` field.
+	Email    string `json:"email"`
+	Username string `json:"username"`
 	Password string `json:"password" binding:"required"`
 }
 
@@ -157,7 +159,17 @@ func (h *Handler) login(c *gin.Context) {
 		c.Error(httpx.NewValidation(err.Error(), nil))
 		return
 	}
-	res, err := h.svc.Login(c.Request.Context(), req.Email, req.Password)
+	ident := strings.TrimSpace(req.Username)
+	if ident == "" {
+		ident = strings.TrimSpace(req.Email)
+	}
+	if ident == "" {
+		c.Error(httpx.NewValidation("Nhập số điện thoại hoặc email", nil))
+		return
+	}
+	// LoginByUsername resolves SĐT or email, keeping the app's token shape
+	// (access_token + refresh + UUID user).
+	res, err := h.svc.LoginByUsername(c.Request.Context(), ident, req.Password)
 	if err != nil {
 		c.Error(err)
 		return

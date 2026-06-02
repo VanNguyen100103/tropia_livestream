@@ -73,7 +73,7 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
       await AuthService.instance.login(
-        email:    _emailCtrl.text.trim(),
+        username: _emailCtrl.text.trim(),
         password: _passwordCtrl.text,
       );
       AppLogger.logUserEvent(action: 'login_success', context: _tag);
@@ -173,15 +173,18 @@ class _LoginScreenState extends State<LoginScreen> {
                   const SizedBox(height: AppSizes.md),
                 ],
 
-                // Email
+                // Email (đăng ký) / SĐT hoặc Email (đăng nhập)
                 _Field(
                   controller: _emailCtrl,
-                  label: 'Email',
-                  icon: Icons.email_outlined,
-                  keyboardType: TextInputType.emailAddress,
+                  label: _isRegister ? 'Email' : 'SĐT hoặc Email',
+                  icon: _isRegister ? Icons.email_outlined : Icons.account_circle_outlined,
+                  keyboardType:
+                      _isRegister ? TextInputType.emailAddress : TextInputType.text,
                   validator: (v) {
-                    if (v == null || v.isEmpty) return 'Nhập email';
-                    if (!v.contains('@')) return 'Email không hợp lệ';
+                    if (v == null || v.trim().isEmpty) {
+                      return _isRegister ? 'Nhập email' : 'Nhập SĐT hoặc email';
+                    }
+                    if (_isRegister && !v.contains('@')) return 'Email không hợp lệ';
                     return null;
                   },
                 ),
@@ -470,9 +473,9 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
     setState(() => _isVerifying = true);
     try {
       await AuthService.instance.verifyOtp(email: widget.email, otp: otp);
-      // Auto-login sau xác thực OTP
+      // Auto-login sau xác thực OTP (email cũng là username hợp lệ)
       await AuthService.instance.login(
-        email:    widget.email,
+        username: widget.email,
         password: widget.password,
       );
       if (mounted) {

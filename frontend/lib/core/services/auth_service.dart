@@ -203,9 +203,11 @@ class AuthService extends ChangeNotifier {
 
   // ── Login ───────────────────────────────────────────────────────────────────
 
-  Future<void> login({required String email, required String password}) async {
+  /// Đăng nhập bằng SĐT hoặc email. Backend /api/auth/login nhận `username`
+  /// (resolve phone→email) và vẫn trả access_token + refresh_token + user{UUID}.
+  Future<void> login({required String username, required String password}) async {
     final res = await _dio.post('/api/auth/login', data: {
-      'email':    email,
+      'username': username,
       'password': password,
     });
 
