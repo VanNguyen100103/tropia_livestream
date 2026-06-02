@@ -2355,13 +2355,19 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
     } catch (_) {/* WS will catch up */}
   }
 
-  /// Splits `rtmp://host:port/app/streamkey` into
-  /// `(rtmp://host:port/app, streamkey)` — what apivideo_live_stream expects.
+  /// Splits `rtmp://host:port/app/streamkey?token=xxx` into
+  /// `(rtmp://host:port/app, streamkey?token=xxx)` — what
+  /// apivideo_live_stream expects. The publish token (live/start) lives in
+  /// the query string and MUST stay attached to the stream key, otherwise
+  /// SRS on_publish rejects the push (LIVESTREAM_API.md §5.1).
   (String, String) _parseRtmp(String rtmpUrl) {
     final uri = Uri.parse(rtmpUrl);
     final parts = uri.path.split('/').where((s) => s.isNotEmpty).toList();
     final app = parts.isNotEmpty ? '/${parts.first}' : '/live';
-    final key = parts.length >= 2 ? parts.last : '';
+    var key = parts.length >= 2 ? parts.last : '';
+    if (key.isNotEmpty && uri.query.isNotEmpty) {
+      key = '$key?${uri.query}';
+    }
     final port = uri.hasPort ? ':${uri.port}' : '';
     return ('${uri.scheme}://${uri.host}$port$app', key);
   }
