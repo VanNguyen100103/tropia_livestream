@@ -29,9 +29,20 @@ const (
 	couponH       = 56
 	botChipW      = 140
 	botChipH      = 44
-	giftW         = 460
+	giftW         = 380
 	giftH         = 72
 	defaultFontPx = 22
+
+	// giftLaneStep is the vertical gap (px) between two stacked gift
+	// banners. Gifts live in the RIGHT column (see overlayExpr), which is
+	// free of the left-side products and the bottom chat, so the stack can
+	// grow downward through most of the frame. giftMaxLane caps it before
+	// the bottom chat band: on the smallest source in use (720×1280, chat
+	// top ≈755px) base 280 + 4*step(80) + giftH(72) = 672 < 755 still
+	// clears. Bursts beyond that reuse the last lane (overlap each other)
+	// rather than running into the chat.
+	giftLaneStep = giftH + 8
+	giftMaxLane  = 4
 )
 
 // fontPath defaults to the Windows Arial TTF (which supports Vietnamese
@@ -475,9 +486,15 @@ func scaleToFill(src image.Image, w, h int) image.Image {
 // Position is computed in BuildFFmpegFilter (depends on overlay type).
 type OverlayAsset struct {
 	Path    string
-	Type    string // "pin" | "coupon" | "bot"
+	Type    string // "pin" | "coupon" | "bot" | "gift"
 	StartMs int64
 	EndMs   int64
+
+	// Lane is a vertical stacking slot for overlays that can appear
+	// concurrently at the same base position. Only gifts use it today:
+	// two gifts whose 5s windows overlap get distinct lanes so they
+	// stack instead of drawing on top of each other. 0 = base position.
+	Lane int
 }
 
 // PrepareOverlays walks live_events, renders the appropriate PNG into
@@ -507,7 +524,14 @@ func PrepareOverlays(ctx context.Context, events []LiveEventLite, workDir string
 		assets = append(assets, OverlayAsset{Path: path, Type: "coupon", StartMs: e.StartMs, EndMs: end})
 	}
 
-	// Gifts: each event → a banner shown for 5s.
+	// Gifts: each event → a banner shown for 5s. Gifts arrive in bursts
+	// during a live, and every banner renders at the same center spot, so
+	// concurrent ones would stack on top of each other and become an
+	// unreadable smear. Assign each gift the lowest vertical lane whose
+	// previous occupant has already faded out (greedy interval colouring);
+	// bake.go offsets each lane upward, away from the bottom chat band.
+	// `giftLaneEnds[l]` holds the EndMs of the gift currently in lane l.
+	var giftLaneEnds []int64
 	for i, e := range events {
 		if e.Type != "gift" {
 			continue
@@ -520,7 +544,22 @@ func PrepareOverlays(ctx context.Context, events []LiveEventLite, workDir string
 		if end > endMs {
 			end = endMs
 		}
-		assets = append(assets, OverlayAsset{Path: path, Type: "gift", StartMs: e.StartMs, EndMs: end})
+		lane := -1
+		for l, le := range giftLaneEnds {
+			if e.StartMs >= le { // lane free again by the time this gift starts
+				lane = l
+				giftLaneEnds[l] = end
+				break
+			}
+		}
+		if lane == -1 {
+			lane = len(giftLaneEnds)
+			giftLaneEnds = append(giftLaneEnds, end)
+		}
+		if lane > giftMaxLane { // cap so a gift storm never marches off the top
+			lane = giftMaxLane
+		}
+		assets = append(assets, OverlayAsset{Path: path, Type: "gift", StartMs: e.StartMs, EndMs: end, Lane: lane})
 	}
 
 	// Pins: pair up product_pin / product_unpin into spans. If a pin

@@ -36,6 +36,15 @@ type noopPublisher struct{}
 
 func (noopPublisher) Publish(context.Context, string, any) error { return nil }
 
+// ListChangeNotifier lets the webhook push a live-list refresh to every
+// viewer subscribed to the platform-wide WS feed. SRS flips a session to
+// 'live' (on_publish) / 'offline' (on_unpublish) here, outside the live
+// Handler, so without this the Live tab wouldn't refresh until the user
+// manually retried. Satisfied by *live.Handler.NotifyListChange.
+type ListChangeNotifier interface {
+	NotifyListChange(reason string)
+}
+
 type Handler struct {
 	repo   *live.SessionRepository
 	events EventPublisher
@@ -51,6 +60,10 @@ type Handler struct {
 	// nil disables duplicate detection (the repo-level status check
 	// still applies). See onPublish.
 	cache *cache.Cache
+	// notifier fans out a Live-tab refresh when a session flips to
+	// live/offline via SRS webhooks. Optional; nil = no push (viewers
+	// fall back to manual retry / their own reconnect refresh).
+	notifier ListChangeNotifier
 }
 
 func NewHandler(repo *live.SessionRepository) *Handler {
@@ -86,6 +99,13 @@ func (h *Handler) WithEvents(p EventPublisher) *Handler {
 	if p != nil {
 		h.events = p
 	}
+	return h
+}
+
+// WithListNotifier wires the live-list refresh push so on_publish /
+// on_unpublish update every Live-tab viewer without a manual retry.
+func (h *Handler) WithListNotifier(n ListChangeNotifier) *Handler {
+	h.notifier = n
 	return h
 }
 
@@ -194,7 +214,11 @@ func (h *Handler) onPublish(c *gin.Context) {
 			_ = rds.Expire(ctx, key, publisherLockTTL).Err()
 		}
 	}
-	_ = h.repo.MarkLiveSpec(ctx, p.Stream)
+	if err := h.repo.MarkLiveSpec(ctx, p.Stream); err == nil && h.notifier != nil {
+		// Stream just went live — tell Live-tab viewers to refetch so the
+		// card appears immediately instead of after a manual "Thử lại".
+		h.notifier.NotifyListChange("session_live")
+	}
 	ok(c)
 }
 
@@ -233,7 +257,11 @@ func (h *Handler) onUnpublish(c *gin.Context) {
 			slog.Default().Warn("srs: publisher lock lookup failed", "err", err)
 		}
 	}
-	_ = h.repo.EndByChannelSpec(ctx, p.Stream)
+	if err := h.repo.EndByChannelSpec(ctx, p.Stream); err == nil && h.notifier != nil {
+		// Publisher gone (host closed app / network drop without an explicit
+		// live/stop) — refresh the Live tab so the ended stream drops off.
+		h.notifier.NotifyListChange("session_offline")
+	}
 	ok(c)
 }
 

@@ -82,6 +82,12 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
   DateTime? _liveStartedAt;
   Timer? _liveTicker;
   Duration _liveElapsed = Duration.zero;
+  // Hard cap on broadcast length — the live auto-ends 2h after it starts
+  // so a host who forgets to tap "Kết thúc Live" doesn't leave a zombie
+  // session running (and burning RTMP). Set in _startLive, enforced in
+  // the 1s ticker, surfaced to the host via a small banner.
+  static const _maxLiveDuration = Duration(hours: 2);
+  DateTime? _scheduledEndAt;
   // Cached publish credentials so we can re-attach RTMP after the user
   // backgrounds the app (Android pauses the activity → camera + RTMP
   // socket are torn down by the system; on resume we re-init the
@@ -799,6 +805,15 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
             top: 0, left: 0, right: 0,
             child: _buildLiveTopBar(),
           ),
+          // Auto-end notice — tiny centered pill telling the host when the
+          // broadcast will stop on its own. Sits just under the top bar,
+          // away from the bottom-anchored chat (left) and side toolbar
+          // (right) so it never covers their controls.
+          if (_scheduledEndAt != null)
+            Positioned(
+              top: 52, left: 0, right: 0,
+              child: Center(child: _buildAutoEndBanner()),
+            ),
           // Chat overlay (left column, between the top bar and the pinned
           // product cards). The bottom is anchored above the product chips
           // (~bottom 250) so the "Chat người mua" header is never hidden,
@@ -947,6 +962,35 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
                 Text('$_statViewers',
                     style: const TextStyle(color: Colors.white, fontSize: AppSizes.fontXs, fontWeight: FontWeight.w600)),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutoEndBanner() {
+    final end = _scheduledEndAt!;
+    final hh = end.hour.toString().padLeft(2, '0');
+    final mm = end.minute.toString().padLeft(2, '0');
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(AppSizes.radiusFull),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.timer_outlined, color: Colors.white70, size: 12),
+          const SizedBox(width: 4),
+          Text(
+            'Tự kết thúc lúc $hh:$mm',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: AppSizes.fontXs,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
@@ -2158,6 +2202,7 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
         _rtmpServer = server;
         _rtmpStreamKey = streamKey;
         _liveStartedAt = DateTime.now();
+        _scheduledEndAt = DateTime.now().add(_maxLiveDuration);
         _liveElapsed = Duration.zero;
         _statViewers = 0;
         _statLikes = 0;
@@ -2294,6 +2339,15 @@ class _LiveSetupScreenState extends State<LiveSetupScreen>
     _liveTicker?.cancel();
     _liveTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || _liveStartedAt == null) return;
+      // Auto-end once we hit the scheduled cutoff (start + 2h). Guard on
+      // _isLive so we don't re-enter _stopLive while it's already tearing
+      // down (the ticker is cancelled in _stopLive, but the in-flight tick
+      // can still run once).
+      final end = _scheduledEndAt;
+      if (_isLive && end != null && !DateTime.now().isBefore(end)) {
+        _stopLive();
+        return;
+      }
       setState(() => _liveElapsed = DateTime.now().difference(_liveStartedAt!));
     });
   }

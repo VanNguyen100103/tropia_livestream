@@ -79,33 +79,13 @@ class LiveCardWidget extends StatelessWidget {
                     ],
                   ],
                 ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    const Icon(Icons.remove_red_eye_outlined, size: 12, color: AppColors.textHint),
-                    const SizedBox(width: 3),
-                    Text(
-                      stream.viewerCountFormatted,
-                      style: const TextStyle(fontSize: AppSizes.fontXs, color: AppColors.textHint),
-                    ),
-                    const SizedBox(width: AppSizes.sm),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: AppColors.primaryContainer,
-                        borderRadius: BorderRadius.circular(AppSizes.radiusFull),
-                      ),
-                      child: Text(
-                        stream.category,
-                        style: const TextStyle(
-                          color: AppColors.primary,
-                          fontSize: 9,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+                // Hàng phụ: lượt xem + danh mục. Chỉ hiện khi có dữ liệu thật —
+                // tránh để lại icon mắt cô đơn + pill rỗng ("dư ra") khi
+                // viewerCount = 0 hoặc category trống.
+                if (_buildMeta() case final meta?) ...[
+                  const SizedBox(height: 2),
+                  meta,
+                ],
               ],
             ),
           ),
@@ -119,6 +99,44 @@ class LiveCardWidget extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  /// Lượt xem + danh mục. Trả về null khi cả hai đều rỗng để không render
+  /// hàng trống. Mỗi phần tử cũng tự ẩn riêng nếu thiếu dữ liệu.
+  Widget? _buildMeta() {
+    final hasViewers = stream.viewerCount > 0;
+    final hasCategory = stream.category.trim().isNotEmpty;
+    if (!hasViewers && !hasCategory) return null;
+
+    return Row(
+      children: [
+        if (hasViewers) ...[
+          const Icon(Icons.remove_red_eye_outlined, size: 12, color: AppColors.textHint),
+          const SizedBox(width: 3),
+          Text(
+            stream.viewerCountFormatted,
+            style: const TextStyle(fontSize: AppSizes.fontXs, color: AppColors.textHint),
+          ),
+        ],
+        if (hasViewers && hasCategory) const SizedBox(width: AppSizes.sm),
+        if (hasCategory)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: AppColors.primaryContainer,
+              borderRadius: BorderRadius.circular(AppSizes.radiusFull),
+            ),
+            child: Text(
+              stream.category,
+              style: const TextStyle(
+                color: AppColors.primary,
+                fontSize: 9,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+      ],
     );
   }
 

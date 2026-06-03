@@ -182,6 +182,12 @@ func Bake(ctx context.Context, in BakeInput) (string, error) {
 		inLabel := fmt.Sprintf("[%d:v]", i+1) // overlay input streams start at index 1
 		outLabel := fmt.Sprintf("[v%d]", i+1)
 		x, y := overlayExpr(a.Type)
+		if a.Type == "gift" && a.Lane > 0 {
+			// Stack concurrent gifts downward from the base spot, toward
+			// (but capped before) the product carousel — see the lane
+			// assignment + giftMaxLane cap in PrepareOverlays.
+			y = fmt.Sprintf("%s+%d", y, a.Lane*giftLaneStep)
+		}
 		startSec := float64(a.StartMs) / 1000.0
 		endSec := float64(a.EndMs) / 1000.0
 		fmt.Fprintf(&fg, "%s%soverlay=x=%s:y=%s:enable='between(t\\,%.3f\\,%.3f)'%s;",
@@ -361,9 +367,19 @@ func overlayExpr(typ string) (string, string) {
 		// list PNG height (varies with # of products).
 		return "24", "H*0.30"
 	case "gift":
-		// Bottom-center, above the chat band — a transient celebratory
-		// banner that doesn't permanently occupy a corner.
-		return "(W-w)/2", "H*0.62"
+		// RIGHT column, starting just below the top banner row. The center
+		// column is taken (top-center pin spotlight + bottom chat band) and
+		// the pin is ~75% of the frame width, so a gift can't dodge it
+		// horizontally — every centered position (H*0.62 hit chat, H*0.42
+		// hit products, y=180 sat on the pin) collided with something. The
+		// products live in the LEFT column (x=24, ≤304px wide) and the chat
+		// is bottom-anchored, leaving the right column free: a right-aligned
+		// (W-w-16, gift PNG narrowed to 380px so its left edge ≈324px stays
+		// clear of the products) banner at y=280 sits below the pin/coupon
+		// row, right of the products, and well above the chat. Concurrent
+		// gifts stack DOWNWARD through this free column (lane offset in the
+		// overlay loop), capped by giftMaxLane before the chat band.
+		return "W-w-16", "280"
 	}
 	return "24", "24"
 }

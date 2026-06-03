@@ -333,7 +333,11 @@ func main() {
 	srsH := srs.NewHandler(sessRepo).
 		WithEvents(bus).
 		WithSecret(os.Getenv("SRS_WEBHOOK_SECRET")).
-		WithCache(cc)
+		WithCache(cc).
+		// Push a Live-tab refresh when SRS flips a session live/offline so
+		// viewers sitting on the list see the stream appear/disappear
+		// immediately instead of having to tap "Thử lại".
+		WithListNotifier(liveH)
 	if gin.Mode() == gin.ReleaseMode && os.Getenv("SRS_WEBHOOK_SECRET") == "" {
 		log.Fatalf("SRS_WEBHOOK_SECRET must be set in release mode (webhook would accept forged on_publish/on_dvr otherwise)")
 	}

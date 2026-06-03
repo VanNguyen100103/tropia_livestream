@@ -1836,6 +1836,16 @@ func (h *Handler) listWS(c *gin.Context) {
 	}
 }
 
+// NotifyListChange is the exported entry point for other packages (the
+// SRS webhook handler) to fan out a live-list refresh. SRS on_publish /
+// on_unpublish flip a session's status outside this handler, so without
+// this hook viewers sitting on the Live tab wouldn't learn a stream went
+// live (or ended) until they manually hit "Thử lại". Delegates to the
+// internal publishListChange.
+func (h *Handler) NotifyListChange(reason string) {
+	h.publishListChange(reason)
+}
+
 // publishListChange notifies every global subscriber that the live
 // list has changed. Payload is intentionally tiny — clients re-fetch
 // `/streams` themselves (the 3s Redis cache absorbs the burst).
