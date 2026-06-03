@@ -1,0 +1,101 @@
+# Uncomment this line to define a global platform for your project
+platform :ios, '14.0'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+#  use_frameworks!
+  use_frameworks! :linkage => :static
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      # This is the key setting to allow non-modular headers in framework modules
+      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+      # Also set this to ensure proper module handling
+      config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+      # Additional settings to help with module imports
+      config.build_settings['SWIFT_INCLUDE_PATHS'] = '$(inherited) ${PODS_CONFIGURATION_BUILD_DIR}'
+      config.build_settings['HEADER_SEARCH_PATHS'] = '$(inherited) ${PODS_ROOT}/Headers/Public ${PODS_ROOT}/Headers/Public/Firebase ${PODS_ROOT}/Headers/Public/FirebaseMessaging ${PODS_CONFIGURATION_BUILD_DIR}'
+      
+      # Fix for firebase_messaging plugin (FLTFirebaseMessagingPlugin)
+      # This allows non-modular headers to be included in framework modules
+      if target.name == 'firebase_messaging' || target.name.include?('FLTFirebaseMessaging')
+        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+        config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+        config.build_settings['DEFINES_MODULE'] = 'NO'
+        config.build_settings['SWIFT_VERSION'] = '5.0'
+        config.build_settings['USE_HEADERMAP'] = 'NO'
+        config.build_settings['ALWAYS_SEARCH_USER_PATHS'] = 'NO'
+        # Allow importing non-modular headers
+        config.build_settings['CLANG_WARN_NON_MODULAR_INCLUDES'] = 'NO'
+        # Add compiler flag to suppress the error
+        config.build_settings['OTHER_CFLAGS'] = '$(inherited) -Wno-error=non-modular-include-in-framework-module'
+      end
+      
+      # Fix for Firebase Messaging SDK
+      if target.name == 'FirebaseMessaging'
+        config.build_settings['DEFINES_MODULE'] = 'YES'
+        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+        config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+        config.build_settings['SWIFT_VERSION'] = '5.0'
+      end
+      
+      # Fix for all Firebase targets
+      if target.name.include?('Firebase')
+        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+        config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+      end
+    end
+  end
+  
+  # Apply to project level as well
+  installer.pods_project.build_configurations.each do |config|
+    config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+    config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+  end
+  
+  # Also apply to the main Runner project if we can access it
+  installer.aggregate_targets.each do |aggregate_target|
+    aggregate_target.user_project.native_targets.each do |target|
+      target.build_configurations.each do |config|
+        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+        config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+      end
+    end
+    aggregate_target.user_project.build_configurations.each do |config|
+      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+      config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+    end
+  end
+end

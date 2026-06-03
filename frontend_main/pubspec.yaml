@@ -1,0 +1,95 @@
+name: tropia_mobile_app_android
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.3+2
+
+environment:
+  sdk: ^3.10.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # Icons & UI
+  cupertino_icons: ^1.0.8
+  google_fonts: ^6.3.2
+  flutter_svg: ^2.2.3
+  carousel_slider: ^5.1.1
+  
+  # Navigation
+  go_router: ^17.0.0
+  
+  # Dashboard & Admin features (Mới thêm)
+  fl_chart: ^0.66.0
+  intl: ^0.19.0
+  flutter_dotenv: ^6.0.0
+  dio: ^5.9.0
+  shared_preferences: ^2.5.4
+  barcode_widget: ^2.0.4
+  package_info_plus: ^9.0.0
+  # Notification / Firebase
+  # Bumped from 2.x/14.x → 3.x/15.x: the old firebase_messaging_web (3.5.18)
+  # uses removed dart:html / PromiseJsImpl APIs and can't compile on the
+  # current Flutter web SDK (breaks `flutter build web`). The 3.x/15.x line
+  # uses package:web and compiles for web. Public API used here (initializeApp,
+  # FirebaseMessaging.instance, getToken, onMessage, onBackgroundMessage,
+  # RemoteMessage) is unchanged, so no call-site edits are needed.
+  firebase_core: ^3.6.0
+  firebase_messaging: ^15.1.3
+  http: ^1.6.0
+  device_info_plus: ^12.3.0
+  url_launcher: ^6.3.2
+  flutter_local_notifications: ^20.0.0
+  scrollable_positioned_list: ^0.3.8
+  # Maps & Location
+  google_maps_flutter: ^2.5.0
+  location: ^5.0.1
+  geocoding: ^3.0.0
+  shimmer: ^3.0.0
+  cached_network_image: ^3.4.1
+
+  # ── Livestream module (lib/livestream/**) ──────────────────────────────
+  # Ported from the standalone tropia livestream app. These power the Live
+  # tab (HLS viewing, RTMP publish, realtime chat, AI suggestions, gifts).
+  provider: ^6.1.1                     # Live module state management
+  crypto: ^3.0.3                       # PKCE code_challenge for Google OAuth
+  video_player: ^2.8.2                 # HLS playback
+  chewie: ^1.7.4                       # video_player controls UI
+  web: ^1.1.0                          # hls.js bridge on web
+  web_socket_channel: ^3.0.1           # realtime chat + stats push
+  visibility_detector: ^0.4.0+2        # autoplay cards in viewport
+  camera: ^0.11.0                      # in-app camera preview/publish
+  permission_handler: ^11.3.1          # camera/mic permissions
+  apivideo_live_stream: ^1.2.0         # RTMP publish from phone
+  google_mlkit_face_detection: ^0.13.0 # AR sticker face detection
+  lottie: ^3.1.0                       # gift/reward animations
+  timeago: ^3.6.1                      # relative timestamps
+  uuid: ^4.3.3                         # client-side ids
+  logger: ^2.2.0                       # AppLogger backend
+  image_picker: ^1.1.2                 # thumbnail / product images
+  flutter_secure_storage: ^9.2.2       # JWT token storage
+  font_awesome_flutter: ^10.7.0        # extra icons in live UI
+  app_links: ^7.0.0                    # payment deep-link return
+  share_plus: ^10.0.0                  # share live stream
+  pointer_interceptor: ^0.10.1+2       # web overlay click-through
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - .env
+
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: true
+  image_path: "assets/images/logo.png" # Đường dẫn tới ảnh logo của bạn
+  min_sdk_android: 21 
+  adaptive_icon_background: "#FFFFFF"

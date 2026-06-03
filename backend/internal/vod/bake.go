@@ -356,8 +356,14 @@ func overlayExpr(typ string) (string, string) {
 		// front and center.
 		return "(W-w)/2", "80"
 	case "coupon":
-		// Top-right, below the LIVE badge area (~96px down).
-		return "W-w-24", "96"
+		// Top-right, but BELOW the top-center pin spotlight. The pin
+		// banner is 540px wide and centered, so on a 720px frame it spans
+		// x≈90..630 / y 80..168 — it overlaps any top-right coupon both
+		// horizontally and vertically, and (being drawn later in the
+		// filter chain) covers it. y=180 clears the pin's bottom edge
+		// (80+pinBannerH=168) with margin, and stays above the products
+		// (H*0.30) and the gift column (y=280).
+		return "W-w-24", "180"
 	case "bot":
 		// Top-right corner, above the coupon banner.
 		return "W-w-24", "32"

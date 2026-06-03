@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "880354958298",
+    "project_id": "tropiamart-5b1a1",
+    "storage_bucket": "tropiamart-5b1a1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:880354958298:android:0e8b5fd799609fb240fee3",
+        "android_client_info": {
+          "package_name": "com.thienhai.tropia_mobile_app_android"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBvI4nFEQGF0NUJv3QaAs2zN9IZI3X6KsA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

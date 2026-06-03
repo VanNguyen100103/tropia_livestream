@@ -87,3 +87,31 @@ infra/dvr/
 
 # Stray screen-recording artifacts
 backend/cmd/bake-test/Screen Recording*.mp4
+
+# ── Old Flutter app (frontend/) — replaced by frontend_main/, kept local only ─
+/frontend/
+
+# ── Flutter / Dart / Pub (frontend_main/) ────────────────────────────────────
+frontend_main/.dart_tool/
+frontend_main/.flutter-plugins-dependencies
+frontend_main/.pub-cache/
+frontend_main/.pub/
+frontend_main/build/
+frontend_main/coverage/
+frontend_main/flutter_run.log
+frontend_main/**/doc/api/
+frontend_main/**/ios/Flutter/.last_build_id
+frontend_main/android/app/debug/
+frontend_main/android/app/profile/
+frontend_main/android/app/release/
+frontend_main/app.*.symbols
+frontend_main/app.*.map.json
+
+# frontend_main secrets — NEVER commit
+frontend_main/.env
+frontend_main/.env.*
+frontend_main/firebase-service-account.json
+frontend_main/env.development.json
+frontend_main/env.staging.json
+frontend_main/env.production.json
+frontend_main/env.local.json
