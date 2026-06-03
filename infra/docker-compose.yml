@@ -1,0 +1,92 @@
+# Tropia Live MVP Stack
+# - SRS: media server (RTMP ingest + LL-HLS output + WebRTC)
+# - Postgres: main DB
+# - Redis: chat pub/sub, session cache
+# - Go backend: REST API (build context = ../backend-go)
+#
+# Run: docker compose up -d
+# Logs: docker compose logs -f srs
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tropia-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tropia
+      POSTGRES_PASSWORD: tropia_dev_password
+      POSTGRES_DB: tropia
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tropia"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: tropia-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # SRS - Simple Realtime Server
+  # - RTMP ingest:  rtmp://localhost:1935/live/{stream_key}
+  # - LL-HLS out:   http://localhost:8080/live/{stream_key}.m3u8
+  # - WebRTC WHIP:  http://localhost:1985/rtc/v1/whip/?app=live&stream={key}
+  # - WebRTC WHEP:  http://localhost:1985/rtc/v1/whep/?app=live&stream={key}
+  # - HTTP API:     http://localhost:1985/api/v1/
+  srs:
+    image: ossrs/srs:5
+    container_name: tropia-srs
+    restart: unless-stopped
+    ports:
+      - "1935:1935"   # RTMP
+      - "8080:8080"   # HTTP-FLV / HLS (raw — viewers go through nginx on 8090)
+      - "1985:1985"   # HTTP API + WHIP/WHEP
+      - "8000:8000/udp"  # WebRTC media
+      - "10080:10080/udp"  # SRT
+    volumes:
+      - ./srs/srs.conf:/usr/local/srs/conf/srs.conf:ro
+      # Share DVR recordings to host so the Go worker can read + upload to R2.
+      - ./dvr:/usr/local/srs/objs/nginx/html/dvr
+    command: ./objs/srs -c conf/srs.conf
+    depends_on:
+      - postgres
+      - redis
+
+  # Nginx reverse proxy in front of SRS's HLS port.
+  # SRS hardcodes `Connection: close` on every response, so every .ts
+  # and .m3u8 request from a browser opens a new TCP socket. On Windows
+  # that exhausts the ephemeral port pool (16k ports, TIME_WAIT ~2 min)
+  # after ~10 minutes of viewing — Chrome surfaces it as
+  # net::ERR_ADDRESS_IN_USE and hls.js dies.
+  #
+  # Nginx terminates the client connection with keep-alive and pools a
+  # small set of upstream sockets to SRS, so the buyer only opens a
+  # handful of TCPs to nginx instead of one per segment.
+  hls-proxy:
+    image: nginx:1.27-alpine
+    container_name: tropia-hls-proxy
+    restart: unless-stopped
+    ports:
+      - "8090:8090"   # HLS for viewers (backend now returns this in playback URLs)
+    volumes:
+      - ./nginx/hls-proxy.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - srs
+
+volumes:
+  postgres_data:
+  redis_data:

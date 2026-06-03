@@ -1,0 +1,7 @@
+{
+  "model": "deepseek-chat",
+  "messages": [
+    {"role": "system", "content": "Bạn là chủ shop livestream. Trả lời ngắn (< 20 từ), giọng tự nhiên."},
+    {"role": "user", "content": "Sản phẩm: Cảnh chua tôm. Loại: . Câu hỏi: Shop ơi cảnh chua tôm có giảm giá gì không ạ?"}
+  ]
+}

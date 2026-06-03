@@ -1,0 +1,34 @@
+# Ingress — assumes NGINX ingress controller + cert-manager (Let's Encrypt).
+# Replace api.tropia.vn / hls.tropia.vn with your real domains.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tropia
+  namespace: tropia
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 64m  # for image uploads
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.tropia.vn, hls.tropia.vn]
+      secretName: tropia-tls
+  rules:
+    - host: api.tropia.vn
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port: { number: 3000 }
+    - host: hls.tropia.vn
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: srs
+                port: { number: 8080 }

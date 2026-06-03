@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: tropia
+data:
+  PORT: "3000"
+  GIN_MODE: release
+  # Set this to the production frontend domain(s) before applying!
+  # The backend refuses to boot in release mode if CORS_ORIGIN is empty
+  # or `*` (incompatible with AllowCredentials=true).
+  CORS_ORIGIN: "https://tropia.vn"
+  REDIS_ADDR: redis:6379
+  REDIS_DB: "0"
+  JWT_ACCESS_TTL: 15m
+  JWT_REFRESH_TTL: 168h
+  SRS_RTMP_HOST: rtmp://srs:1935
+  # Points at the nginx keep-alive proxy in front of SRS, not SRS direct.
+  # See infra/nginx/hls-proxy.conf for context.
+  SRS_HLS_HOST: http://hls-proxy:8090
+  SRS_WHIP_HOST: http://srs:1985
+  SRS_API_HOST: http://srs:1985
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: tropia
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+  selector:
+    app: backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: tropia
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Pod-level hardening: matches the `app` (uid 10001) user baked
+      # into backend/Dockerfile. fsGroup so the emptyDir volume mounts
+      # are writable for the non-root process.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          # Pin to a digest in CI to lock the image content even if a
+          # tag is force-pushed. Example for the release pipeline:
+          #   image: registry.tropia.vn/backend@sha256:<digest from `docker push`>
+          # The `:dev` tag is fine for in-cluster smoke tests but MUST be
+          # replaced before promotion to production.
+          image: tropia/backend:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef: { name: backend-config }
+            - secretRef:    { name: tropia-secrets }
+          # DATABASE_URL goes through PgBouncer (transaction mode) so a
+          # full pgxpool (200 conns × 3 replicas = 600 client conns)
+          # multiplexes onto ~150 real Postgres backends. See
+          # k8s/pgbouncer.yaml for the pool sizing math.
+          env:
+            - name: DATABASE_URL
+              value: postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@pgbouncer:6432/tropia?sslmode=disable
+            # Tuning knobs read by internal/database/postgres.go. Bump
+            # MAX_CONNS here without recompiling when traffic grows.
+            - name: POSTGRES_MAX_CONNS
+              value: "200"
+            - name: POSTGRES_MIN_CONNS
+              value: "20"
+          # readOnlyRootFilesystem above blocks every write — Go's
+          # default TempDir and any libraries that touch /tmp need a
+          # writable mount. emptyDir is per-pod, wiped on restart.
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            # 1 vCPU / 512Mi was too tight for 200 pooled conns + Go
+            # goroutines under load. 2 vCPU / 1Gi gives headroom for
+            # 1k concurrent viewer poll without OOM.
+            requests: { cpu: 200m, memory: 256Mi }
+            limits:   { cpu: "2",  memory: 1Gi }
+          readinessProbe:
+            httpGet: { path: /health, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 3000 }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
+---
+# HorizontalPodAutoscaler — scales backend on CPU
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  namespace: tropia
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
