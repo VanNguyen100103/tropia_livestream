@@ -18,3 +18,6 @@
 *.test
 *.out
 vendor/
+
+# Local-disk media fallback (video uploads when R2 is unconfigured)
+/uploads/

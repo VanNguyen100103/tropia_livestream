@@ -41,13 +41,16 @@ func SecurityHeaders() gin.HandlerFunc {
 	}
 }
 
-// RequestSizeGuard - 413 for non-upload routes > maxKB
-func RequestSizeGuard(maxKB int64, skipPrefix string) gin.HandlerFunc {
+// RequestSizeGuard - 413 for non-upload routes > maxKB. skipPrefixes are
+// exempted (multipart upload routes that legitimately carry large bodies).
+func RequestSizeGuard(maxKB int64, skipPrefixes ...string) gin.HandlerFunc {
 	maxBytes := maxKB * 1024
 	return func(c *gin.Context) {
-		if skipPrefix != "" && strings.HasPrefix(c.Request.URL.Path, skipPrefix) {
-			c.Next()
-			return
+		for _, p := range skipPrefixes {
+			if p != "" && strings.HasPrefix(c.Request.URL.Path, p) {
+				c.Next()
+				return
+			}
 		}
 		if c.Request.ContentLength > maxBytes {
 			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request too large", "code": "PAYLOAD_TOO_LARGE"})

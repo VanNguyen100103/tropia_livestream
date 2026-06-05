@@ -34,6 +34,7 @@ type Coupon struct {
 	ExpiresAt     time.Time  `json:"expires_at"`
 	IsActive      bool       `json:"is_active"`
 	SessionID     *uuid.UUID `json:"session_id,omitempty"`
+	ShopID        *uuid.UUID `json:"shop_id,omitempty"`
 	CreatedBy     uuid.UUID  `json:"created_by"`
 	CreatedAt     time.Time  `json:"created_at"`
 }
@@ -49,7 +50,7 @@ var ErrCouponNotFound = errors.New("coupon not found")
 func (r *CouponRepository) FindByCode(ctx context.Context, code string) (*Coupon, error) {
 	const q = `
 		SELECT id, code, discount_type, discount_value, min_order_value, max_discount, max_uses,
-		       used_count, expires_at, is_active, session_id, created_by, created_at
+		       used_count, expires_at, is_active, session_id, shop_id, created_by, created_at
 		FROM coupons WHERE code = $1
 	`
 	var c Coupon
@@ -112,7 +113,7 @@ func (r *CouponRepository) RecordUsage(ctx context.Context, couponID, userID, or
 func (r *CouponRepository) ListPlatformActive(ctx context.Context) ([]Coupon, error) {
 	const q = `
 		SELECT id, code, discount_type, discount_value, min_order_value, max_discount, max_uses,
-		       used_count, expires_at, is_active, session_id, created_by, created_at
+		       used_count, expires_at, is_active, session_id, shop_id, created_by, created_at
 		FROM coupons
 		WHERE session_id IS NULL AND is_active = TRUE AND expires_at > NOW()
 		ORDER BY created_at DESC
@@ -140,13 +141,22 @@ func (r *CouponRepository) ListPlatformActive(ctx context.Context) ([]Coupon, er
 // they saved during a live broadcast. There is no `coupons.shop_id`
 // column; we resolve ownership via the session's seller.
 func (r *CouponRepository) ListByShop(ctx context.Context, shopID uuid.UUID) ([]Coupon, error) {
+	// A shop's vouchers are either attached directly (c.shop_id = the shop —
+	// seller-created standing vouchers) OR derived from one of the shop's live
+	// sessions (legacy live coupons, resolved via live_sessions.seller_id).
 	const q = `
 		SELECT c.id, c.code, c.discount_type, c.discount_value, c.min_order_value, c.max_discount, c.max_uses,
-		       c.used_count, c.expires_at, c.is_active, c.session_id, c.created_by, c.created_at
+		       c.used_count, c.expires_at, c.is_active, c.session_id, c.shop_id, c.created_by, c.created_at
 		FROM coupons c
-		JOIN live_sessions ls ON ls.id = c.session_id
-		JOIN shops s          ON s.seller_id = ls.seller_id
-		WHERE s.id = $1 AND c.is_active = TRUE AND c.expires_at > NOW()
+		WHERE c.is_active = TRUE AND c.expires_at > NOW()
+		  AND (
+		        c.shop_id = $1
+		     OR c.session_id IN (
+		            SELECT ls.id FROM live_sessions ls
+		            JOIN shops s ON s.seller_id = ls.seller_id
+		            WHERE s.id = $1
+		        )
+		      )
 		ORDER BY c.created_at DESC
 	`
 	rows, err := r.pool.Query(ctx, q, shopID)
@@ -165,10 +175,33 @@ func (r *CouponRepository) ListByShop(ctx context.Context, shopID uuid.UUID) ([]
 	return out, rows.Err()
 }
 
+// ShopHasActiveCoupon reports whether a shop has at least one active,
+// non-expired voucher (attached directly via shop_id, or via one of its live
+// sessions). Powers the "Mua với Voucher" flag on video cards — cheap EXISTS,
+// no row materialisation.
+func (r *CouponRepository) ShopHasActiveCoupon(ctx context.Context, shopID uuid.UUID) (bool, error) {
+	const q = `
+		SELECT EXISTS (
+			SELECT 1 FROM coupons c
+			WHERE c.is_active = TRUE AND c.expires_at > NOW()
+			  AND (
+			        c.shop_id = $1
+			     OR c.session_id IN (
+			            SELECT ls.id FROM live_sessions ls
+			            JOIN shops s ON s.seller_id = ls.seller_id
+			            WHERE s.id = $1
+			        )
+			      )
+		)`
+	var ok bool
+	err := r.pool.QueryRow(ctx, q, shopID).Scan(&ok)
+	return ok, err
+}
+
 func (r *CouponRepository) ListBySession(ctx context.Context, sessionID uuid.UUID) ([]Coupon, error) {
 	const q = `
 		SELECT id, code, discount_type, discount_value, min_order_value, max_discount, max_uses,
-		       used_count, expires_at, is_active, session_id, created_by, created_at
+		       used_count, expires_at, is_active, session_id, shop_id, created_by, created_at
 		FROM coupons WHERE session_id = $1 AND is_active = TRUE
 		ORDER BY created_at DESC
 	`
@@ -188,16 +221,16 @@ func (r *CouponRepository) ListBySession(ctx context.Context, sessionID uuid.UUI
 	return out, rows.Err()
 }
 
-func (r *CouponRepository) Create(ctx context.Context, code, discountType string, value, minOrder float64, maxDiscount, maxUses *int, expires time.Time, sessionID *uuid.UUID, createdBy uuid.UUID) (*Coupon, error) {
+func (r *CouponRepository) Create(ctx context.Context, code, discountType string, value, minOrder float64, maxDiscount, maxUses *int, expires time.Time, sessionID, shopID *uuid.UUID, createdBy uuid.UUID) (*Coupon, error) {
 	const q = `
-		INSERT INTO coupons (code, discount_type, discount_value, min_order_value, max_discount, max_uses, expires_at, session_id, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO coupons (code, discount_type, discount_value, min_order_value, max_discount, max_uses, expires_at, session_id, shop_id, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, code, discount_type, discount_value, min_order_value, max_discount, max_uses,
-		          used_count, expires_at, is_active, session_id, created_by, created_at
+		          used_count, expires_at, is_active, session_id, shop_id, created_by, created_at
 	`
 	var c Coupon
 	if err := scanCoupon(r.pool.QueryRow(ctx, q,
-		strings.ToUpper(code), discountType, value, int(minOrder), maxDiscount, maxUses, expires, sessionID, createdBy,
+		strings.ToUpper(code), discountType, value, int(minOrder), maxDiscount, maxUses, expires, sessionID, shopID, createdBy,
 	), &c); err != nil {
 		return nil, err
 	}
@@ -207,7 +240,7 @@ func (r *CouponRepository) Create(ctx context.Context, code, discountType string
 func scanCoupon(row interface{ Scan(...any) error }, c *Coupon) error {
 	return row.Scan(
 		&c.ID, &c.Code, &c.DiscountType, &c.DiscountValue, &c.MinOrderValue, &c.MaxDiscount, &c.MaxUses,
-		&c.UsedCount, &c.ExpiresAt, &c.IsActive, &c.SessionID, &c.CreatedBy, &c.CreatedAt,
+		&c.UsedCount, &c.ExpiresAt, &c.IsActive, &c.SessionID, &c.ShopID, &c.CreatedBy, &c.CreatedAt,
 	)
 }
 

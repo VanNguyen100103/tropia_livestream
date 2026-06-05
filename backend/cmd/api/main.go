@@ -26,12 +26,14 @@ import (
 	"github.com/tropia/backend/internal/config"
 	"github.com/tropia/backend/internal/database"
 	"github.com/tropia/backend/internal/events"
+	"github.com/tropia/backend/internal/flashsale"
 	"github.com/tropia/backend/internal/httpx"
 	"github.com/tropia/backend/internal/live"
 	"github.com/tropia/backend/internal/payment"
 	"github.com/tropia/backend/internal/shops"
 	"github.com/tropia/backend/internal/srs"
 	"github.com/tropia/backend/internal/storage"
+	"github.com/tropia/backend/internal/video"
 )
 
 func main() {
@@ -168,7 +170,7 @@ func main() {
 	// both handler output and error responses.
 	router.Use(httpx.EnvelopeWrapper())
 	router.Use(httpx.ErrorHandler(logger))
-	router.Use(httpx.RequestSizeGuard(64, "/api/upload"))
+	router.Use(httpx.RequestSizeGuard(64, "/api/upload", "/api/videos/upload"))
 	// CORS — whitelist per-environment via CORS_ORIGIN. We refuse to boot
 	// in release mode if the list is empty (`*` + AllowCredentials is
 	// invalid per CORS spec). In dev we fall back to localhost defaults
@@ -204,6 +206,12 @@ func main() {
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true, "service": "tropia-backend", "ts": time.Now().Unix()})
 	})
+
+	// Static serving for the local-disk media fallback (video MP4 + covers
+	// when R2 is not configured — typical for local dev). The video media
+	// store writes under ./uploads and returns "/uploads/..." path URLs the
+	// Flutter client resolves against this host (same as the HLS proxy).
+	router.Static("/uploads", "./uploads")
 
 	// Prometheus
 	metrics := httpx.NewMetrics()
@@ -308,6 +316,19 @@ func main() {
 	memberRepo := live.NewShopMemberRepository(db)
 	liveGate := live.RequireLivePermission(memberRepo)
 
+	// Video (short-form "for you" feed — Shopee Video style). Watching is
+	// public; POSTING is gated by the same live-permission rule (shop owner /
+	// approved member / admin) via liveGate. Media uploads go to R2 when
+	// configured, else to local disk served at /uploads. memberRepo doubles
+	// as the ShopResolver that attributes a clip to the poster's shop.
+	videoH := video.NewHandler(
+		video.NewRepository(db),
+		video.NewMediaStore(r2, "uploads"),
+		cc,
+		memberRepo,
+	)
+	videoH.Register(router.Group("/api"), authMw, optAuthMw, liveGate, adminMw)
+
 	// LIVESTREAM_API.md endpoint surface: live/start, live/stop, live/my,
 	// live/list, live/watch, live/chat/*, live/gifts*, live/gift/send.
 	liveH.RegisterSpec(router.Group("/api/live"), authMw, liveGate)
@@ -370,8 +391,24 @@ func main() {
 	// before checkout). Host coupon CRUD is registered under /api/live by
 	// the live handler — these routes are intentionally separate so the
 	// public list endpoints stay reachable without seller auth.
-	couponH := commerce.NewCouponHandler(cpnRepo)
-	couponH.Register(router.Group("/api/coupons"), authMw)
+	couponH := commerce.NewCouponHandler(cpnRepo).WithShopResolver(
+		func(ctx context.Context, sellerID uuid.UUID) (uuid.UUID, bool, error) {
+			// A seller without a shop yet → ok=false (handler returns a friendly
+			// "chưa có shop" message rather than a 500).
+			s, err := shopRepo.FindBySellerID(ctx, sellerID)
+			if err != nil {
+				return uuid.Nil, false, nil
+			}
+			return s.ID, true, nil
+		})
+	couponH.Register(router.Group("/api/coupons"), authMw, sellerMw)
+
+	// Flash sales (admin-scheduled platform discounts). Reading active sales is
+	// public; create/edit/delete is admin-only. The video feed card reads a
+	// product's active flash price via a join in video.productsForVideos, not
+	// these routes.
+	flashSaleH := flashsale.NewHandler(flashsale.NewRepository(db))
+	flashSaleH.Register(router.Group("/api"), authMw, adminMw)
 
 	// Orders
 	orderH := commerce.NewOrderHandler(orderSvc, orderRepo)

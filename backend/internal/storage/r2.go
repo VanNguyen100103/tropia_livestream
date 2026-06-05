@@ -92,10 +92,17 @@ func (r *R2) Delete(ctx context.Context, key string) error {
 
 // URLFor returns the public URL.
 func (r *R2) URLFor(key string) string {
+	return r.PublicBaseURL() + "/" + key
+}
+
+// PublicBaseURL returns the origin/prefix every object URL is built on (no
+// trailing slash). Used to verify a client-supplied URL actually points at our
+// bucket before we persist it (prevents arbitrary-URL injection on create).
+func (r *R2) PublicBaseURL() string {
 	if r.publicURL != "" {
-		return r.publicURL + "/" + key
+		return r.publicURL
 	}
-	return fmt.Sprintf("https://pub-%s.r2.dev/%s", r.bucket, key)
+	return fmt.Sprintf("https://pub-%s.r2.dev", r.bucket)
 }
 
 // PresignPut creates a presigned URL clients can PUT to directly (avoiding backend bandwidth).

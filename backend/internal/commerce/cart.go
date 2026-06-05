@@ -284,6 +284,26 @@ func (h *CartHandler) addItem(c *gin.Context) {
 	if salePrice != nil {
 		unitPrice = *salePrice
 	}
+	// An active flash sale overrides the unit price (Shopee "Flash Sale"). The
+	// feed card already advertises this price; applying it here keeps the cart
+	// and checkout honest. OriginalPrice stays the variant base price so the
+	// cart's "tiết kiệm" line reflects the full saving. (sold_count is not
+	// decremented here — cart-add isn't a sale; per-slot stock enforcement at
+	// purchase time is future work.)
+	var flashPrice *int
+	_ = pool.QueryRow(c.Request.Context(),
+		`SELECT fsp.flash_price
+		   FROM flash_sale_products fsp
+		   JOIN flash_sales fs ON fs.id = fsp.flash_sale_id
+		  WHERE fsp.product_id = $1
+		    AND fs.is_active AND fs.starts_at <= NOW() AND fs.ends_at > NOW()
+		    AND (fsp.stock_limit IS NULL OR fsp.sold_count < fsp.stock_limit)
+		  ORDER BY fsp.flash_price ASC, fs.ends_at ASC
+		  LIMIT 1`,
+		productID).Scan(&flashPrice)
+	if flashPrice != nil && *flashPrice < unitPrice {
+		unitPrice = *flashPrice
+	}
 	item, err := h.repo.Upsert(c.Request.Context(), CartItem{
 		UserID: uid, VariantID: req.VariantID, ProductID: &productID, ProductName: productName,
 		ShopID: shopID, ShopName: shopName, ImageURL: imageURL,

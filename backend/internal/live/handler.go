@@ -1455,7 +1455,7 @@ func (h *Handler) createCoupon(c *gin.Context) {
 		strings.ToUpper(req.Code), req.DiscountType,
 		req.DiscountValue, req.MinOrderValue,
 		nil, req.MaxUses,
-		expires, &id, uid)
+		expires, &id, nil, uid)
 	if err != nil {
 		c.Error(httpx.NewInternal("create coupon", err))
 		return
