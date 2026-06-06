@@ -53,7 +53,7 @@ func (s *r2Store) Owns(url string) bool {
 // diskStore writes to <root>/<key> on disk and returns "/<root>/<key>" — a
 // path-relative URL the static route serves and the Flutter client resolves
 // against the backend host (AppConfig.resolveBackendUrl, same as HLS).
-// key uses forward slashes (e.g. "videos/<id>.mp4").
+// key uses forward slashes (e.g. "videos/clips/<id>/source.mp4").
 type diskStore struct{ root string }
 
 func (s *diskStore) Save(_ context.Context, key, _ string, data []byte) (string, error) {

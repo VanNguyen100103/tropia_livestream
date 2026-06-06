@@ -24,15 +24,23 @@ type ShopResolver interface {
 	AuthorizedShop(ctx context.Context, userID uuid.UUID) (uuid.UUID, bool, error)
 }
 
-type Handler struct {
-	repo  *Repository
-	store MediaStore
-	cache *cache.Cache
-	shops ShopResolver
+// EventPublisher lets create() enqueue the async overlay-bake job without this
+// package importing events. Satisfied by *events.EventBus. nil ⇒ no bake is
+// queued (the feed still works; clips just never get an overlay copy).
+type EventPublisher interface {
+	Publish(ctx context.Context, eventType string, payload any) error
 }
 
-func NewHandler(repo *Repository, store MediaStore, cc *cache.Cache, shops ShopResolver) *Handler {
-	return &Handler{repo: repo, store: store, cache: cc, shops: shops}
+type Handler struct {
+	repo   *Repository
+	store  MediaStore
+	cache  *cache.Cache
+	shops  ShopResolver
+	events EventPublisher
+}
+
+func NewHandler(repo *Repository, store MediaStore, cc *cache.Cache, shops ShopResolver, ev EventPublisher) *Handler {
+	return &Handler{repo: repo, store: store, cache: cc, shops: shops, events: ev}
 }
 
 func (h *Handler) Register(r *gin.RouterGroup, authMw, optAuthMw, liveGate, adminMw gin.HandlerFunc) {
@@ -55,6 +63,8 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, optAuthMw, liveGate, admi
 	authed := r.Group("/videos", authMw)
 	authed.GET("/following", h.following)
 	authed.GET("/me", h.myVideos)
+	authed.GET("/me/liked", h.myLiked)
+	authed.GET("/me/stats", h.myStats)
 	authed.POST("/:id/like", h.like)
 	authed.DELETE("/:id/like", h.unlike)
 	authed.POST("/:id/comments", commentLimit, h.addComment)
@@ -261,6 +271,45 @@ func (h *Handler) myVideos(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"videos": vids})
+}
+
+// myLiked lists the videos the caller has liked (profile "Đã thích" tab),
+// most-recently-liked first. Same card shape as the Video grid so the client
+// can reuse the feed viewer.
+func (h *Handler) myLiked(c *gin.Context) {
+	uid, ok := callerUID(c)
+	if !ok {
+		c.Error(httpx.NewAuth("unauthenticated"))
+		return
+	}
+	limit, offset := paging(c)
+	vids, err := h.repo.Liked(c.Request.Context(), uid, uid, limit, offset)
+	if err != nil {
+		c.Error(httpx.NewInternal("liked videos", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"videos": vids})
+}
+
+// myStats powers the logged-in user's profile header (đang theo dõi / người
+// theo dõi / lượt thích). Kept server-authoritative so the counts match the
+// Live/Video tabs instead of the old hardcoded zeros.
+func (h *Handler) myStats(c *gin.Context) {
+	uid, ok := callerUID(c)
+	if !ok {
+		c.Error(httpx.NewAuth("unauthenticated"))
+		return
+	}
+	following, followers, likes, err := h.repo.CreatorStats(c.Request.Context(), uid)
+	if err != nil {
+		c.Error(httpx.NewInternal("creator stats", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"following_count": following,
+		"follower_count":  followers,
+		"like_count":      likes,
+	})
 }
 
 // ── interactions ─────────────────────────────────────────────────────────────
@@ -511,6 +560,11 @@ func looksLikeImage(b []byte) bool {
 
 // upload stores the MP4 (and an optional cover image) and returns their URLs.
 // The client then POSTs /api/videos with these URLs + caption/hashtags.
+//
+// R2 layout: each clip gets its own folder under videos/clips/<id>/, holding
+// source.<ext> + (optional) thumb.<ext> together — so a clip's cover never sits
+// loose next to other clips' mp4s. Livestream replays live under a sibling
+// prefix (videos/replays/<sessionId>/), kept separate from these uploads.
 func (h *Handler) upload(c *gin.Context) {
 	// Hard-cap the whole request body (this route is exempt from the global
 	// RequestSizeGuard). Reads past the cap fail, so FormFile below errors out
@@ -549,7 +603,7 @@ func (h *Handler) upload(c *gin.Context) {
 		return
 	}
 	vid := uuid.NewString()
-	videoURL, err := h.store.Save(c.Request.Context(), "videos/"+vid+ext, ct, data)
+	videoURL, err := h.store.Save(c.Request.Context(), "videos/clips/"+vid+"/source"+ext, ct, data)
 	if err != nil {
 		c.Error(httpx.NewInternal("save video", err))
 		return
@@ -562,7 +616,7 @@ func (h *Handler) upload(c *gin.Context) {
 		text := strings.ToLower(path.Ext(th.Filename))
 		if tct, okT := allowedThumbExts[text]; okT && th.Size <= maxThumbBytes {
 			if tdata, e := io.ReadAll(tf); e == nil && len(tdata) <= maxThumbBytes && looksLikeImage(tdata) {
-				if turl, e2 := h.store.Save(c.Request.Context(), "videos/"+vid+"_thumb"+text, tct, tdata); e2 == nil {
+				if turl, e2 := h.store.Save(c.Request.Context(), "videos/clips/"+vid+"/thumb"+text, tct, tdata); e2 == nil {
 					resp["thumbnail_url"] = turl
 				}
 			}
@@ -682,6 +736,14 @@ func (h *Handler) create(c *gin.Context) {
 	if err != nil {
 		c.Error(httpx.NewInternal("create video", err))
 		return
+	}
+	// Queue the static-overlay bake (shop handle + caption + product card +
+	// voucher badge + watermark) for the downloadable/shareable copy. Async:
+	// the feed serves the raw clip right away; overlay_url fills in once the
+	// worker finishes. Best-effort — a publish failure just leaves the clip's
+	// overlay_status 'pending' and never blocks the post.
+	if h.events != nil {
+		_ = h.events.Publish(c.Request.Context(), "video.created", map[string]any{"video_id": v.ID.String()})
 	}
 	c.JSON(http.StatusCreated, v)
 }

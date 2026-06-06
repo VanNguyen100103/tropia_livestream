@@ -103,9 +103,14 @@ func (r *Repository) FindBySellerID(ctx context.Context, sellerID uuid.UUID) (*S
 }
 
 func (r *Repository) Create(ctx context.Context, sellerID uuid.UUID, name, slug, desc string) (*Shop, error) {
+	// New shops get a name-based default logo (ui-avatars renders the initials)
+	// so their videos/cards show an avatar from day one instead of a bare
+	// placeholder. The seller can replace it later via Update.
 	const q = `
-		INSERT INTO shops (seller_id, name, slug, description)
-		VALUES ($1, $2, $3, NULLIF($4, ''))
+		INSERT INTO shops (seller_id, name, slug, description, logo_url)
+		VALUES ($1, $2, $3, NULLIF($4, ''),
+		        'https://ui-avatars.com/api/?background=FF6B35&color=fff&size=256&name='
+		        || replace(trim($2), ' ', '+'))
 		RETURNING id, seller_id, name, slug, description, logo_url, banner_url,
 		          rating, total_sales, follower_count, is_active, created_at
 	`

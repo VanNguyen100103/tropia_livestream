@@ -1,0 +1,2 @@
+ALTER TABLE videos DROP COLUMN IF EXISTS overlay_url;
+ALTER TABLE videos DROP COLUMN IF EXISTS overlay_status;

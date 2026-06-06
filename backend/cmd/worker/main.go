@@ -10,22 +10,27 @@
 //   - payment.success         → payment receipt email
 //   - order.cancelled         → cancellation email
 //   - recording.created       → FFmpeg remux FLV→MP4 + upload to Cloudflare R2
+//   - video.created           → bake static overlay onto the clip → upload copy
 //
 // Each handler runs in its own goroutine with its own consumer name so
 // Redis Streams' consumer-group semantics give us at-least-once delivery
 // + automatic retry on handler error (via PEL).
 //
 // Usage:
-//   go run ./cmd/worker
-//   make worker
+//
+//	go run ./cmd/worker
+//	make worker
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -44,6 +49,7 @@ import (
 	"github.com/tropia/backend/internal/live"
 	"github.com/tropia/backend/internal/notify"
 	"github.com/tropia/backend/internal/storage"
+	"github.com/tropia/backend/internal/video"
 	"github.com/tropia/backend/internal/vod"
 )
 
@@ -85,6 +91,7 @@ func main() {
 
 	sessRepo := live.NewSessionRepository(db)
 	eventsRepo := live.NewEventRepository(db)
+	videoRepo := video.NewRepository(db)
 
 	// R2 (optional — if creds not set, recording handler will skip uploads).
 	var r2 *storage.R2
@@ -124,6 +131,7 @@ func main() {
 		{topic: "payment.success", group: "notify-payment-success", handler: handlePaymentSuccess(emailer, logger)},
 		{topic: "order.cancelled", group: "notify-order-cancelled", handler: handleOrderCancelled(emailer, logger)},
 		{topic: "recording.created", group: "vod-uploader", handler: handleRecording(r2, sessRepo, eventsRepo, dvrRoot, logger)},
+		{topic: "video.created", group: "video-overlay", handler: handleVideoOverlay(r2, videoRepo, logger)},
 	}
 
 	var wg sync.WaitGroup
@@ -229,8 +237,8 @@ type orderLineItem struct {
 }
 
 type orderEvent struct {
-	OrderID        string          `json:"order_id"`
-	BuyerID        string          `json:"buyer_id"`
+	OrderID         string          `json:"order_id"`
+	BuyerID         string          `json:"buyer_id"`
 	BuyerName       string          `json:"buyer_name"`
 	Email           string          `json:"email"`
 	Name            string          `json:"name"`
@@ -439,13 +447,13 @@ func handleOrderCancelled(emailer *notify.Email, log *slog.Logger) events.Handle
 type recordingEvent struct {
 	SessionID   string `json:"session_id"`
 	StreamKey   string `json:"stream_key"`
-	SrsFilePath string `json:"srs_file_path"`  // path relative to DVR root, e.g. "live/live_xxx.123.flv"
+	SrsFilePath string `json:"srs_file_path"` // path relative to DVR root, e.g. "live/live_xxx.123.flv"
 	DurationSec int    `json:"duration_sec"`
 }
 
 // handleRecording is fired when SRS finishes writing a DVR .flv file.
 // It remuxes FLV → MP4 with FFmpeg (no re-encode, ~instant), uploads the
-// MP4 to Cloudflare R2 under videos/vod/<sessionId>/<ts>.mp4, then sets
+// MP4 to Cloudflare R2 under videos/replays/<sessionId>/<ts>.mp4, then sets
 // live_sessions.vod_mp4_url so viewers can replay the broadcast.
 //
 // Requirements:
@@ -453,14 +461,15 @@ type recordingEvent struct {
 //     Default: "../infra/dvr" (relative to backend/ working dir).
 //   - `ffmpeg` on PATH.
 //   - R2 credentials configured (otherwise the upload is skipped with a warning).
+//
 // handleRecording is fired when SRS finishes writing a DVR .flv file.
 // Pipeline:
-//   1. Look up the session + its chat + host action events from DB.
-//   2. Run the bake pipeline (vod.Bake): re-encode FLV → MP4 with
-//      chat subtitles burned in via libass. Phase 2 will also overlay
-//      pin/coupon/bot PNGs.
-//   3. Upload final MP4 to R2 at videos/vod/<sessionId>/<ts>.mp4 and
-//      set live_sessions.vod_mp4_url.
+//  1. Look up the session + its chat + host action events from DB.
+//  2. Run the bake pipeline (vod.Bake): re-encode FLV → MP4 with
+//     chat subtitles burned in via libass. Phase 2 will also overlay
+//     pin/coupon/bot PNGs.
+//  3. Upload final MP4 to R2 at videos/replays/<sessionId>/<ts>.mp4 and
+//     set live_sessions.vod_mp4_url.
 //
 // This is the SLOW path — full re-encode at ~1× realtime on a laptop
 // CPU. The previous `-c copy` remux is gone because we can't bake
@@ -545,7 +554,7 @@ func handleRecording(r2 *storage.R2, repo *live.SessionRepository, eventsRepo *l
 			_ = os.RemoveAll(workDir)
 			return err
 		}
-		r2Key := fmt.Sprintf("videos/vod/%s/%d.mp4", ev.SessionID, time.Now().Unix())
+		r2Key := fmt.Sprintf("videos/replays/%s/%d.mp4", ev.SessionID, time.Now().Unix())
 		url, err := r2.Upload(ctx, r2Key, "video/mp4", mp4Bytes)
 		if err != nil {
 			_ = repo.MarkRecordingFailed(ctx, recID, err.Error())
@@ -573,6 +582,163 @@ func handleRecording(r2 *storage.R2, repo *live.SessionRepository, eventsRepo *l
 		)
 		return nil
 	}
+}
+
+// ── Video overlay bake ───────────────────────────────────────────────────────
+
+type videoCreatedEvent struct {
+	VideoID string `json:"video_id"`
+}
+
+// handleVideoOverlay bakes the static-overlay copy of a freshly-posted clip.
+// It loads the video + its tagged products/coupons, downloads the raw MP4 from
+// R2 over HTTP, renders the info overlay PNG, composites it with FFmpeg, and
+// uploads the result to videos/clips/<id>/overlay.mp4, then records
+// videos.overlay_url. The feed keeps serving the raw clip throughout — this
+// copy is only for download / sharing the clip outside the app.
+func handleVideoOverlay(r2 *storage.R2, repo *video.Repository, log *slog.Logger) events.HandlerFunc {
+	return func(ctx context.Context, data []byte) error {
+		ev, err := decode[videoCreatedEvent](data)
+		if err != nil {
+			return err
+		}
+		vidUUID, err := uuid.Parse(ev.VideoID)
+		if err != nil {
+			return fmt.Errorf("invalid video id: %w", err)
+		}
+
+		// Load the clip with its joined shop / products / coupons (viewer=Nil).
+		v, err := repo.GetByID(ctx, uuid.Nil, vidUUID)
+		if errors.Is(err, video.ErrNotFound) {
+			return nil // deleted before we got to it — drop the job
+		}
+		if err != nil {
+			return err
+		}
+		if r2 == nil {
+			log.Warn("video overlay skip: R2 not configured", "video_id", ev.VideoID)
+			_ = repo.SetOverlayStatus(ctx, vidUUID, "skipped")
+			return nil
+		}
+		_ = repo.SetOverlayStatus(ctx, vidUUID, "processing")
+
+		workDir := filepath.Join(os.TempDir(), "tropia-overlay-"+vidUUID.String())
+		defer os.RemoveAll(workDir)
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			_ = repo.SetOverlayStatus(ctx, vidUUID, "failed")
+			return err
+		}
+
+		// 1. Download the raw clip from its public R2 URL.
+		srcPath := filepath.Join(workDir, "source.mp4")
+		if err := httpDownload(ctx, v.VideoURL, srcPath); err != nil {
+			_ = repo.SetOverlayStatus(ctx, vidUUID, "failed")
+			return fmt.Errorf("download raw clip: %w", err)
+		}
+
+		// 2. Render the static overlay PNG from the clip's metadata.
+		pngPath := filepath.Join(workDir, "overlay.png")
+		if err := vod.RenderFeedOverlay(ctx, buildFeedOverlayInput(v), pngPath); err != nil {
+			_ = repo.SetOverlayStatus(ctx, vidUUID, "failed")
+			return fmt.Errorf("render overlay: %w", err)
+		}
+
+		// 3. Composite overlay over the clip (FFmpeg).
+		bakedPath, err := vod.BakeFeedOverlay(ctx, vod.FeedBakeInput{
+			SrcPath: srcPath, OverlayPNG: pngPath, WorkDir: workDir, Logger: log,
+		})
+		if err != nil {
+			_ = repo.SetOverlayStatus(ctx, vidUUID, "failed")
+			return err
+		}
+
+		// 4. Upload alongside the raw clip and record the URL.
+		mp4Bytes, err := os.ReadFile(bakedPath)
+		if err != nil {
+			_ = repo.SetOverlayStatus(ctx, vidUUID, "failed")
+			return err
+		}
+		key := fmt.Sprintf("videos/clips/%s/overlay.mp4", vidUUID)
+		url, err := r2.Upload(ctx, key, "video/mp4", mp4Bytes)
+		if err != nil {
+			_ = repo.SetOverlayStatus(ctx, vidUUID, "failed")
+			return err
+		}
+		if err := repo.SetOverlayURL(ctx, vidUUID, url); err != nil {
+			log.Warn("set overlay_url failed", "err", err)
+		}
+		log.Info("video overlay baked + uploaded",
+			"video_id", ev.VideoID, "size_mb", len(mp4Bytes)/(1024*1024), "url", url)
+		return nil
+	}
+}
+
+// buildFeedOverlayInput maps a video record (with joined shop / products /
+// coupons) to the static overlay layer the renderer burns in.
+func buildFeedOverlayInput(v *video.Video) vod.FeedOverlayInput {
+	handle := ""
+	switch {
+	case v.ShopName != nil && *v.ShopName != "":
+		handle = "@" + *v.ShopName
+	case v.UserName != nil && *v.UserName != "":
+		handle = "@" + *v.UserName
+	}
+	caption := ""
+	if v.Caption != nil {
+		caption = *v.Caption
+	}
+	products := make([]vod.Product, 0, len(v.Products))
+	for _, p := range v.Products {
+		price := float64(p.BasePrice)
+		if p.SalePrice != nil {
+			price = float64(*p.SalePrice)
+		}
+		img := ""
+		if p.ImageURL != nil {
+			img = *p.ImageURL
+		}
+		products = append(products, vod.Product{Name: p.Name, SalePrice: price, ImageURL: img})
+	}
+	labels := make([]string, 0, len(v.Coupons))
+	for _, c := range v.Coupons {
+		if c.DiscountType == "percent" {
+			labels = append(labels, fmt.Sprintf("Giảm %.0f%%", c.DiscountValue))
+		} else {
+			labels = append(labels, fmt.Sprintf("Giảm %.0fđ", c.DiscountValue))
+		}
+	}
+	return vod.FeedOverlayInput{
+		Width:        v.Width,
+		Height:       v.Height,
+		Handle:       handle,
+		Caption:      caption,
+		Hashtags:     v.Hashtags,
+		Products:     products,
+		CouponLabels: labels,
+	}
+}
+
+// httpDownload fetches url into dstPath (pulls the raw clip from public R2).
+func httpDownload(ctx context.Context, url, dstPath string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+	}
+	f, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
+	return err
 }
 
 // ── DVR cleanup sweeper ─────────────────────────────────────────────────────

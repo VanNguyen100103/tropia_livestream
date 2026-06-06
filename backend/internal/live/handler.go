@@ -197,6 +197,13 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, sellerMw gin.HandlerFunc)
 	r.GET("/streams/:id/timeline", h.getTimeline)
 	r.POST("/streams/:id/like", likeLimit, h.likeAnon)
 
+	// Caller's own ended sessions that have a recorded replay (profile "Live"
+	// tab). Mounted at /api/live/replays — a top-level static segment so it
+	// can't collide with the /streams/:id wildcard subtree (gin would panic
+	// on a static child of :id). Any authenticated user may call it; a
+	// non-host just gets an empty list.
+	r.GET("/replays", authMw, h.myReplays)
+
 	authed := r.Group("/streams", authMw)
 	authed.POST("/:id/join", h.join)
 	authed.POST("/:id/leave", h.leave)
@@ -672,6 +679,36 @@ func (h *Handler) getOne(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"session": sess})
+}
+
+// myReplays lists the caller's own ended sessions that have a recorded replay
+// (vod_mp4_url set), newest first — the profile "Live" tab. Owner-scoped: a
+// host only ever sees their own replays here; viewers fetch others' replays
+// through the public /streams/:id/timeline endpoint.
+func (h *Handler) myReplays(c *gin.Context) {
+	claims, ok := auth.ClaimsFrom(c)
+	if !ok {
+		c.Error(httpx.NewAuth("unauthenticated"))
+		return
+	}
+	uid, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		c.Error(httpx.NewAuth("unauthenticated"))
+		return
+	}
+	limit, offset := 30, 0
+	if v, e := strconv.Atoi(c.Query("limit")); e == nil && v > 0 {
+		limit = v
+	}
+	if v, e := strconv.Atoi(c.Query("offset")); e == nil && v >= 0 {
+		offset = v
+	}
+	sessions, err := h.repo.ReplaysBySeller(c.Request.Context(), uid, limit, offset)
+	if err != nil {
+		c.Error(httpx.NewInternal("my replays", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
 }
 
 func (h *Handler) getPlayback(c *gin.Context) {

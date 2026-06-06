@@ -145,6 +145,46 @@ func (r *SessionRepository) ListActive(ctx context.Context, limit int) ([]Sessio
 	return r.ListActiveCursor(ctx, limit, time.Time{}, uuid.Nil)
 }
 
+// ReplaysBySeller lists a seller's own ended sessions that have a recorded
+// replay (vod_mp4_url set), newest first — powers the profile "Live" tab so a
+// host can rewatch their past broadcasts. Uses the same LEFT JOIN column list
+// as GetByID, so scanSession works unchanged. A user who has never streamed
+// just gets an empty slice.
+func (r *SessionRepository) ReplaysBySeller(ctx context.Context, sellerID uuid.UUID, limit, offset int) ([]Session, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	const q = `
+		SELECT ls.id, ls.seller_id, ls.title, ls.description, ls.cover_image_url, ls.category, ls.stream_key, ls.status,
+		       ls.started_at, ls.ended_at, ls.viewer_count, ls.like_count, ls.order_count, ls.revenue,
+		       ls.cart_add_count, ls.follow_count, ls.vod_hls_url, ls.vod_mp4_url, ls.ai_bot_enabled, ls.pinned_product_id, ls.created_at,
+		       p.name, p.avatar_url, s.id, s.name, s.logo_url
+		FROM live_sessions ls
+		LEFT JOIN profiles p ON p.id = ls.seller_id
+		LEFT JOIN shops s    ON s.seller_id = ls.seller_id
+		WHERE ls.seller_id = $1 AND ls.vod_mp4_url IS NOT NULL
+		ORDER BY COALESCE(ls.ended_at, ls.started_at) DESC
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := r.pool.Query(ctx, q, sellerID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Session, 0)
+	for rows.Next() {
+		var s Session
+		if err := scanSession(rows, &s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // ListActiveCursor is the cursor-paginated variant — preferred for
 // any caller that might walk past the first page (threat 7 — DB
 // scraping). The cursor is the (started_at, id) of the last row

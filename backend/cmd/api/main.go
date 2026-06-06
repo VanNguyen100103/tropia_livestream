@@ -326,6 +326,7 @@ func main() {
 		video.NewMediaStore(r2, "uploads"),
 		cc,
 		memberRepo,
+		bus, // publishes video.created → worker bakes the overlay copy
 	)
 	videoH.Register(router.Group("/api"), authMw, optAuthMw, liveGate, adminMw)
 

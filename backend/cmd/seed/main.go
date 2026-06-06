@@ -354,20 +354,38 @@ func seedUsers(ctx context.Context, pool *pgxpool.Pool) error {
 
 func seedShops(ctx context.Context, pool *pgxpool.Pool) error {
 	const q = `
-		INSERT INTO shops (seller_id, name, slug, description, is_active)
-		SELECT id, $1, $2, $3, TRUE FROM profiles WHERE email = $4
+		INSERT INTO shops (seller_id, name, slug, description, logo_url, is_active)
+		SELECT id, $1, $2, $3, $4, TRUE FROM profiles WHERE email = $5
 		ON CONFLICT (seller_id) DO UPDATE
-			SET name = EXCLUDED.name, description = EXCLUDED.description
+			SET name = EXCLUDED.name, description = EXCLUDED.description,
+			    logo_url = EXCLUDED.logo_url
 	`
 	if _, err := pool.Exec(ctx, q,
 		"Tropia Fresh Market",
 		"tropia-fresh-market",
 		"Cửa hàng chính thức của Tropia — thực phẩm + lifestyle.",
+		"https://ui-avatars.com/api/?name=Tropia+Fresh+Market&background=0D9488&color=fff&size=256",
 		"seller@tropia.test",
 	); err != nil {
 		return err
 	}
 	log.Println("  ✓ shop tropia-fresh-market")
+
+	// Backfill: give every shop still missing a logo a name-based default avatar
+	// (ui-avatars renders the initials), so shop videos/cards show an avatar
+	// instead of the bare person placeholder. This also covers shops created at
+	// runtime via become-seller before it set a default logo (e.g. "Shop của A").
+	tag, err := pool.Exec(ctx, `
+		UPDATE shops
+		   SET logo_url = 'https://ui-avatars.com/api/?background=FF6B35&color=fff&size=256&name='
+		                  || replace(trim(name), ' ', '+')
+		 WHERE logo_url IS NULL OR logo_url = ''`)
+	if err != nil {
+		return err
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		log.Printf("  ✓ backfilled logo_url for %d shop(s) without one", n)
+	}
 	return nil
 }
 

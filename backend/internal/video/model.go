@@ -23,17 +23,26 @@ type Video struct {
 	Height       int        `json:"height"`
 	AllowReuse   bool       `json:"allow_reuse"`
 	Status       string     `json:"status"`
-	ViewCount    int        `json:"view_count"`
-	LikeCount    int        `json:"like_count"`
-	CommentCount int        `json:"comment_count"`
-	ShareCount   int        `json:"share_count"`
-	CreatedAt    time.Time  `json:"created_at"`
+	// OverlayURL is the static-overlay baked copy (shop handle + caption +
+	// product card + voucher badge + Tropia watermark), produced async by the
+	// worker for download / external sharing. The feed itself plays VideoURL
+	// (raw) so the live overlay + buy buttons stay interactive. nil until baked.
+	OverlayURL   *string   `json:"overlay_url,omitempty"`
+	ViewCount    int       `json:"view_count"`
+	LikeCount    int       `json:"like_count"`
+	CommentCount int       `json:"comment_count"`
+	ShareCount   int       `json:"share_count"`
+	CreatedAt    time.Time `json:"created_at"`
 
 	// Joined from profiles + shops.
 	UserName   *string `json:"user_name,omitempty"`
 	UserAvatar *string `json:"user_avatar,omitempty"`
 	ShopName   *string `json:"shop_name,omitempty"`
 	ShopSlug   *string `json:"shop_slug,omitempty"`
+	// ShopAvatar is the shop's logo (shops.logo_url), so a shop video's card can
+	// show the shop's avatar (matching its shop name + follow-shop button),
+	// mirroring how the live feed shows seller_avatar. nil for personal videos.
+	ShopAvatar *string `json:"shop_avatar,omitempty"`
 
 	// Catalog products tagged on the clip (Shopee Video "Xem sản phẩm"),
 	// in display order. Always non-nil ([] when none) so the JSON field is a
@@ -76,8 +85,8 @@ type VideoProduct struct {
 	// Active flash-sale price (Shopee "Flash Sale"), populated when the product
 	// is in a sale whose window currently covers now. FlashEndsAt drives the
 	// countdown on the card. Both nil when there's no active flash sale.
-	FlashPrice   *int       `json:"flash_price,omitempty"`
-	FlashEndsAt  *time.Time `json:"flash_ends_at,omitempty"`
+	FlashPrice  *int       `json:"flash_price,omitempty"`
+	FlashEndsAt *time.Time `json:"flash_ends_at,omitempty"`
 }
 
 // VideoCoupon is a seller coupon featured on a video. Its display fields are
@@ -97,20 +106,20 @@ type VideoCoupon struct {
 // VideoReport is a viewer report on a video, joined with display info for the
 // admin moderation queue.
 type VideoReport struct {
-	ID         uuid.UUID  `json:"id"`
-	VideoID    uuid.UUID  `json:"video_id"`
-	ReporterID uuid.UUID  `json:"reporter_id"`
-	Reason     string     `json:"reason"`
-	Status     string     `json:"status"`
-	Action     *string    `json:"action,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	ID         uuid.UUID `json:"id"`
+	VideoID    uuid.UUID `json:"video_id"`
+	ReporterID uuid.UUID `json:"reporter_id"`
+	Reason     string    `json:"reason"`
+	Status     string    `json:"status"`
+	Action     *string   `json:"action,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 
 	// Joined for the admin list.
-	ReporterName  *string `json:"reporter_name,omitempty"`
-	VideoCaption  *string `json:"video_caption,omitempty"`
-	VideoThumb    *string `json:"video_thumbnail_url,omitempty"`
-	VideoStatus   *string `json:"video_status,omitempty"`
-	OwnerName     *string `json:"owner_name,omitempty"`
+	ReporterName *string `json:"reporter_name,omitempty"`
+	VideoCaption *string `json:"video_caption,omitempty"`
+	VideoThumb   *string `json:"video_thumbnail_url,omitempty"`
+	VideoStatus  *string `json:"video_status,omitempty"`
+	OwnerName    *string `json:"owner_name,omitempty"`
 }
 
 // VideoComment is one comment on a video, with its author's display info.

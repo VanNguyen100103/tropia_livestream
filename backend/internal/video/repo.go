@@ -25,7 +25,7 @@ const videoCols = `
 	v.id, v.user_id, v.shop_id, v.video_url, v.thumbnail_url, v.caption, v.hashtags,
 	v.duration_sec, v.width, v.height, v.allow_reuse, v.status,
 	v.view_count, v.like_count, v.comment_count, v.share_count, v.created_at,
-	p.name, p.avatar_url, s.name, s.slug,
+	p.name, p.avatar_url, s.name, s.slug, s.logo_url,
 	($1 <> '00000000-0000-0000-0000-000000000000'::uuid
 		AND EXISTS (SELECT 1 FROM video_likes vl WHERE vl.video_id = v.id AND vl.user_id = $1)) AS liked,
 	($1 <> '00000000-0000-0000-0000-000000000000'::uuid
@@ -35,7 +35,8 @@ const videoCols = `
 		AND EXISTS (SELECT 1 FROM shop_follows sf WHERE sf.user_id = $1 AND sf.shop_id = v.shop_id)) AS shop_following,
 	(v.shop_id IS NOT NULL
 		AND EXISTS (SELECT 1 FROM coupons c
-		             WHERE c.shop_id = v.shop_id AND c.is_active AND c.expires_at > NOW())) AS shop_has_voucher`
+		             WHERE c.shop_id = v.shop_id AND c.is_active AND c.expires_at > NOW())) AS shop_has_voucher,
+	v.overlay_url`
 
 const videoFrom = `
 	FROM videos v
@@ -47,8 +48,9 @@ func scanVideo(row pgx.Row, v *Video) error {
 		&v.ID, &v.UserID, &v.ShopID, &v.VideoURL, &v.ThumbnailURL, &v.Caption, &v.Hashtags,
 		&v.DurationSec, &v.Width, &v.Height, &v.AllowReuse, &v.Status,
 		&v.ViewCount, &v.LikeCount, &v.CommentCount, &v.ShareCount, &v.CreatedAt,
-		&v.UserName, &v.UserAvatar, &v.ShopName, &v.ShopSlug,
+		&v.UserName, &v.UserAvatar, &v.ShopName, &v.ShopSlug, &v.ShopAvatar,
 		&v.Liked, &v.Following, &v.ShopFollowing, &v.ShopHasVoucher,
+		&v.OverlayURL,
 	)
 }
 
@@ -423,6 +425,20 @@ func (r *Repository) Following(ctx context.Context, viewerID uuid.UUID, limit, o
 	return r.collect(ctx, q, viewerID, limit, offset)
 }
 
+// Liked lists the active videos a user has liked, most-recently-liked first —
+// powers the profile "Đã thích" grid. $1 (viewerID) drives the liked/following
+// flags; $2 (likerID) selects the likes. When the viewer is browsing their own
+// liked tab the two are the same, so every row comes back liked=true. The join
+// alias is `lk` to avoid colliding with the `vl` subquery alias in videoCols.
+func (r *Repository) Liked(ctx context.Context, viewerID, likerID uuid.UUID, limit, offset int) ([]Video, error) {
+	q := `SELECT ` + videoCols + videoFrom + `
+		JOIN video_likes lk ON lk.video_id = v.id AND lk.user_id = $2
+		WHERE v.status = 'active'
+		ORDER BY lk.created_at DESC
+		LIMIT $3 OFFSET $4`
+	return r.collect(ctx, q, viewerID, likerID, limit, offset)
+}
+
 // HashtagSuggestion is a single hashtag plus how many active videos use it and
 // their total views — powers the "#" autocomplete in the publish composer
 // (Shopee Video shows "<n> lượt xem" next to each suggestion).
@@ -486,6 +502,23 @@ func (r *Repository) SoftDelete(ctx context.Context, id, userID uuid.UUID, isAdm
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ── Overlay bake bookkeeping ──────────────────────────────────────────────────
+
+// SetOverlayStatus moves a video's overlay-bake job through its lifecycle
+// ('processing' | 'failed' | 'skipped'). Missing ids are a no-op.
+func (r *Repository) SetOverlayStatus(ctx context.Context, id uuid.UUID, status string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE videos SET overlay_status = $2 WHERE id = $1`, id, status)
+	return err
+}
+
+// SetOverlayURL records the baked overlay copy's URL and marks the job 'ready'.
+func (r *Repository) SetOverlayURL(ctx context.Context, id uuid.UUID, url string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE videos SET overlay_url = NULLIF($2, ''), overlay_status = 'ready' WHERE id = $1`,
+		id, url)
+	return err
 }
 
 // Like adds a like (idempotent) and returns the resulting like_count.
@@ -617,6 +650,29 @@ func (r *Repository) Unfollow(ctx context.Context, follower, followee uuid.UUID)
 		return true, err
 	}
 	return false, nil
+}
+
+// CreatorStats aggregates the three counters on a user's profile header:
+// how many accounts they follow ("đang theo dõi"), how many follow them
+// ("người theo dõi"), and the total likes across their videos.
+//
+// A "follow" in this app targets whichever a video/live is attributed to — the
+// shop when one is present, otherwise the creator — so the two follow tables
+// are summed. shop_follows feeds the Live tab's "Theo dõi", user_follows feeds
+// the video creator-follow; counting both keeps the profile header in sync with
+// what the Live/Video tabs actually show. A shop-owning user's followers also
+// include their shop's follower_count.
+func (r *Repository) CreatorStats(ctx context.Context, userID uuid.UUID) (following, followers, likes int, err error) {
+	err = r.pool.QueryRow(ctx, `
+		SELECT
+		  ((SELECT COUNT(*) FROM user_follows WHERE follower_id = $1)
+		    + (SELECT COUNT(*) FROM shop_follows WHERE user_id = $1))::int,
+		  ((SELECT COUNT(*) FROM user_follows WHERE followee_id = $1)
+		    + COALESCE((SELECT follower_count FROM shops WHERE seller_id = $1), 0))::int,
+		  COALESCE((SELECT SUM(like_count) FROM videos
+		            WHERE user_id = $1 AND status = 'active'), 0)::int
+	`, userID).Scan(&following, &followers, &likes)
+	return
 }
 
 // RecordView counts a view. For a logged-in user it's deduped (counts once per

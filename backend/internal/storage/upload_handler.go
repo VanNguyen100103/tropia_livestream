@@ -125,6 +125,7 @@ func (h *UploadHandler) Register(r *gin.RouterGroup, authMw, sellerMw gin.Handle
 	seller.POST("/product", h.product)
 	seller.POST("/variant", h.variant)
 	seller.POST("/shop", h.shop)
+	seller.POST("/shop-logo", h.shopLogo)
 	seller.POST("/live", h.liveCover)
 	seller.POST("/temp", h.temp)
 }
@@ -292,6 +293,41 @@ func (h *UploadHandler) shop(c *gin.Context) {
 	url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
 	if err != nil {
 		c.Error(httpx.NewInternal("r2 upload", err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"url": url, "key": key})
+}
+
+// shopLogo uploads a shop's logo/avatar to R2 AND persists the resulting URL
+// into shops.logo_url in one call — so the shop's videos/cards (which read
+// logo_url as shop_avatar, like the live feed's seller_avatar) show it right
+// away with no second request. Only the shop's owner (or an admin) may upload:
+// same BOLA gate as the banner endpoint. The key is timestamped so each new
+// logo gets a fresh URL, busting any CDN/client cache of the previous one.
+func (h *UploadHandler) shopLogo(c *gin.Context) {
+	rawID := c.PostForm("shop_id")
+	if rawID == "" {
+		c.Error(httpx.NewValidation("shop_id required", nil))
+		return
+	}
+	shopID, ok := h.assertOwner(c, rawID, h.ownerOfShop)
+	if !ok {
+		return
+	}
+	data, ct, err := h.readImage(c, "image")
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	key := fmt.Sprintf("images/shops/%s/logo-%d%s", shopID, time.Now().UnixNano(), extFromCT(ct))
+	url, err := h.r2.Upload(c.Request.Context(), key, ct, data)
+	if err != nil {
+		c.Error(httpx.NewInternal("r2 upload", err))
+		return
+	}
+	if _, err := h.db.Exec(c.Request.Context(),
+		`UPDATE shops SET logo_url = $1 WHERE id = $2`, url, shopID); err != nil {
+		c.Error(httpx.NewInternal("persist logo_url", err))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"url": url, "key": key})
