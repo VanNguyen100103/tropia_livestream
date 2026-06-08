@@ -49,9 +49,10 @@ dependencies:
   shimmer: ^3.0.0
   cached_network_image: ^3.4.1
 
-  # ── Livestream module (lib/livestream/**) ──────────────────────────────
+  # ── Live-commerce module (lib/live_app/**) ─────────────────────────────
   # Ported from the standalone tropia livestream app. These power the Live
-  # tab (HLS viewing, RTMP publish, realtime chat, AI suggestions, gifts).
+  # tab (HLS viewing, RTMP publish, realtime chat, AI suggestions, gifts)
+  # and the short-video feed.
   provider: ^6.1.1                     # Live module state management
   crypto: ^3.0.3                       # PKCE code_challenge for Google OAuth
   video_player: ^2.8.2                 # HLS playback
@@ -68,6 +69,7 @@ dependencies:
   uuid: ^4.3.3                         # client-side ids
   logger: ^2.2.0                       # AppLogger backend
   image_picker: ^1.1.2                 # thumbnail / product images
+  video_thumbnail: ^0.5.3              # auto cover frame khi đăng video
   flutter_secure_storage: ^9.2.2       # JWT token storage
   font_awesome_flutter: ^10.7.0        # extra icons in live UI
   app_links: ^7.0.0                    # payment deep-link return

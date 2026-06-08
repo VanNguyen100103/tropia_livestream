@@ -48,6 +48,7 @@ import (
 	"github.com/tropia/backend/internal/httpx"
 	"github.com/tropia/backend/internal/live"
 	"github.com/tropia/backend/internal/notify"
+	"github.com/tropia/backend/internal/safefetch"
 	"github.com/tropia/backend/internal/storage"
 	"github.com/tropia/backend/internal/video"
 	"github.com/tropia/backend/internal/vod"
@@ -590,6 +591,21 @@ type videoCreatedEvent struct {
 	VideoID string `json:"video_id"`
 }
 
+const (
+	// maxOverlayJobTime bounds one video-overlay bake end-to-end (download +
+	// render + ffmpeg + upload). The video-overlay consumer processes clips
+	// one at a time, so without a cap a single pathological clip (a slow
+	// ffmpeg encode, a stalled download) would wedge the queue and stall every
+	// later clip's bake. ffmpeg + R2 calls take this ctx, so the deadline
+	// actually kills the encode.
+	maxOverlayJobTime = 10 * time.Minute
+	// maxClipDownloadBytes caps the raw clip pulled from R2 before baking. The
+	// upload route already caps clips at 50MB; this is the same ceiling + a
+	// little headroom so a swapped/oversized object can't balloon worker
+	// memory + disk.
+	maxClipDownloadBytes = 64 << 20
+)
+
 // handleVideoOverlay bakes the static-overlay copy of a freshly-posted clip.
 // It loads the video + its tagged products/coupons, downloads the raw MP4 from
 // R2 over HTTP, renders the info overlay PNG, composites it with FFmpeg, and
@@ -606,6 +622,11 @@ func handleVideoOverlay(r2 *storage.R2, repo *video.Repository, log *slog.Logger
 		if err != nil {
 			return fmt.Errorf("invalid video id: %w", err)
 		}
+
+		// Bound the whole job so one bad clip can't wedge the single-threaded
+		// video-overlay consumer (the deadline propagates into ffmpeg + R2).
+		ctx, cancel := context.WithTimeout(ctx, maxOverlayJobTime)
+		defer cancel()
 
 		// Load the clip with its joined shop / products / coupons (viewer=Nil).
 		v, err := repo.GetByID(ctx, uuid.Nil, vidUUID)
@@ -631,7 +652,7 @@ func handleVideoOverlay(r2 *storage.R2, repo *video.Repository, log *slog.Logger
 
 		// 1. Download the raw clip from its public R2 URL.
 		srcPath := filepath.Join(workDir, "source.mp4")
-		if err := httpDownload(ctx, v.VideoURL, srcPath); err != nil {
+		if err := httpDownload(ctx, v.VideoURL, srcPath, maxClipDownloadBytes); err != nil {
 			_ = repo.SetOverlayStatus(ctx, vidUUID, "failed")
 			return fmt.Errorf("download raw clip: %w", err)
 		}
@@ -718,13 +739,18 @@ func buildFeedOverlayInput(v *video.Video) vod.FeedOverlayInput {
 	}
 }
 
-// httpDownload fetches url into dstPath (pulls the raw clip from public R2).
-func httpDownload(ctx context.Context, url, dstPath string) error {
+// httpDownload fetches url into dstPath (pulls the raw clip from public R2),
+// refusing to write more than maxBytes. The clip URL is constrained to our
+// own store at create time, but the download still goes through the SSRF
+// guard as defense-in-depth so a misconfigured/poisoned URL can't make the
+// worker hit an internal host, and the size cap stops a swapped/oversized
+// object from ballooning worker memory + disk.
+func httpDownload(ctx context.Context, url, dstPath string, maxBytes int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := safefetch.Default.Do(req)
 	if err != nil {
 		return err
 	}
@@ -737,8 +763,16 @@ func httpDownload(ctx context.Context, url, dstPath string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	// LimitReader(maxBytes+1) so a file exactly at the cap is still accepted
+	// while anything larger trips the guard below.
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return err
+	}
+	if n > maxBytes {
+		return fmt.Errorf("clip exceeds %d bytes", maxBytes)
+	}
+	return nil
 }
 
 // ── DVR cleanup sweeper ─────────────────────────────────────────────────────

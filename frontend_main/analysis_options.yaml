@@ -15,10 +15,12 @@ analyzer:
     - "**/.dart_tool/**"
     - "**/.flutter-plugins"
     - "**/.flutter-plugins-dependencies"
-    # Ported livestream module — keeps its own (looser) lint conventions from
-    # the standalone tropia app. Excluded so its stylistic infos/warnings don't
-    # drown out lints on the main app's own code. It still compiles & runs.
-    - "lib/livestream/**"
+    # Ported live-commerce module (lib/live_app/** — contains the live &
+    # video features plus their shared core/shell/commerce features). Keeps
+    # its own (looser) lint conventions from the standalone tropia app.
+    # Excluded so its stylistic infos/warnings don't drown out lints on the
+    # main app's own code. It still compiles & runs.
+    - "lib/live_app/**"
 
 linter:
   # The lint rules applied to this project can be customized in the

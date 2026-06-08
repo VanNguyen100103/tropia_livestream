@@ -48,6 +48,13 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, optAuthMw, liveGate, admi
 	commentLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 30, WindowMs: 60 * 1000, FailClosed: false})
 	reportLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 20, WindowMs: 60 * 1000, FailClosed: false})
 	uploadLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 20, WindowMs: 60 * 60 * 1000, FailClosed: false})
+	// share is unauthenticated and bumps a denormalised counter with one DB
+	// UPDATE per call, so without a cap a client could hammer it to inflate
+	// the count + amplify write load. 60/min/IP is far above any real "share"
+	// rhythm. like/unlike + follow/unfollow are deduped (idempotent) but still
+	// churn UPDATEs on rapid toggling, so they share one generous cap.
+	shareLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 60, WindowMs: 60 * 1000, FailClosed: false})
+	interactLimit := httpx.RateLimit(h.cache, httpx.RateLimitConfig{Limit: 120, WindowMs: 60 * 1000, FailClosed: false})
 
 	// Public reads. optAuth so liked/following populate when a token is sent.
 	pub := r.Group("/videos", optAuthMw)
@@ -57,7 +64,7 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, optAuthMw, liveGate, admi
 	pub.GET("/:id", h.getOne)
 	pub.GET("/:id/comments", h.listComments)
 	pub.POST("/:id/view", viewLimit, h.incView)
-	pub.POST("/:id/share", h.incShare)
+	pub.POST("/:id/share", shareLimit, h.incShare)
 
 	// Authenticated interactions (any logged-in user).
 	authed := r.Group("/videos", authMw)
@@ -65,12 +72,12 @@ func (h *Handler) Register(r *gin.RouterGroup, authMw, optAuthMw, liveGate, admi
 	authed.GET("/me", h.myVideos)
 	authed.GET("/me/liked", h.myLiked)
 	authed.GET("/me/stats", h.myStats)
-	authed.POST("/:id/like", h.like)
-	authed.DELETE("/:id/like", h.unlike)
+	authed.POST("/:id/like", interactLimit, h.like)
+	authed.DELETE("/:id/like", interactLimit, h.unlike)
 	authed.POST("/:id/comments", commentLimit, h.addComment)
 	authed.POST("/:id/report", reportLimit, h.report)
-	authed.POST("/creators/:userId/follow", h.follow)
-	authed.DELETE("/creators/:userId/follow", h.unfollow)
+	authed.POST("/creators/:userId/follow", interactLimit, h.follow)
+	authed.DELETE("/creators/:userId/follow", interactLimit, h.unfollow)
 
 	// Posting — gated by the same live-permission rule as livestreaming
 	// (shop owner / approved member / admin).

@@ -16,6 +16,8 @@ import (
 	"github.com/fogleman/gg"
 	"github.com/golang/freetype/truetype"
 	"golang.org/x/image/font"
+
+	"github.com/tropia/backend/internal/safefetch"
 )
 
 // Overlay PNGs are rendered at this DPR-equivalent size and placed on
@@ -392,6 +394,11 @@ func savePNG(dc *gg.Context, path string) error {
 
 // fetchImage downloads + decodes a JPEG/PNG with a 5s timeout. Returns
 // nil on any failure (caller falls back to a placeholder).
+//
+// url is untrusted (a seller-supplied product image URL, stored verbatim),
+// so the fetch goes through the SSRF guard: a URL that resolves to an
+// internal/metadata address is refused at connect time, and we just fall
+// back to the placeholder.
 func fetchImage(ctx context.Context, url string) image.Image {
 	if url == "" {
 		return nil
@@ -402,7 +409,7 @@ func fetchImage(ctx context.Context, url string) image.Image {
 	if err != nil {
 		return nil
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := safefetch.Default.Do(req)
 	if err != nil {
 		return nil
 	}

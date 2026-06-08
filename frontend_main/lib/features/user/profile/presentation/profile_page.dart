@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tropia_mobile_app_android/core/network/dio_client.dart';
-import 'package:tropia_mobile_app_android/livestream/core/services/auth_service.dart'
+import 'package:tropia_mobile_app_android/live_app/core/services/auth_service.dart'
     as live_auth;
 import 'package:tropia_mobile_app_android/features/user/auth/data/datasources/app_auth_remote_datasource.dart';
 import 'package:tropia_mobile_app_android/features/user/auth/data/repositories/app_auth_repository.dart';

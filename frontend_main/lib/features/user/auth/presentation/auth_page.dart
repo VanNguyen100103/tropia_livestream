@@ -14,11 +14,11 @@ import 'package:tropia_mobile_app_android/features/user/auth/data/datasources/ap
 // --- THÊM IMPORT: NotificationService ---
 import 'package:tropia_mobile_app_android/core/services/notification_service.dart';
 
-// --- Bridge sang AuthService riêng của module Livestream (lib/livestream) ---
+// --- Bridge sang AuthService riêng của module Live (lib/live_app) ---
 // Module Live có kho JWT riêng (flutter_secure_storage) và KHÔNG thấy login
 // của app chính. Phải đăng nhập lại vào nó để nút "Live" (phát live của seller)
 // hiện ra và hoạt động.
-import 'package:tropia_mobile_app_android/livestream/core/services/auth_service.dart'
+import 'package:tropia_mobile_app_android/live_app/core/services/auth_service.dart'
     as live_auth;
 
 class AppColors {

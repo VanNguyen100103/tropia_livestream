@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:tropia_mobile_app_android/features/user/promotions/presentation/promotions_page.dart';
 import 'package:tropia_mobile_app_android/features/user/ufresh/presentation/ufresh_page.dart';
 import 'package:tropia_mobile_app_android/features/user/cart/presentation/cart_badge_controller.dart';
-import 'package:tropia_mobile_app_android/livestream/live_tab_entry.dart';
+import 'package:tropia_mobile_app_android/live_app/shell/live_tab_entry.dart';
 import '../../home/presentation/home_page.dart';
 import '../../cart/presentation/cart_page.dart';
 import '../../profile/presentation/profile_page.dart';
@@ -19,7 +19,7 @@ class DashboardPage extends StatefulWidget {
   static const int tabHome = 0;
   static const int tabPromotions = 1;
   static const int tabUfresh = 2;
-  static const int tabLive = 3; // Livestream module (lib/livestream)
+  static const int tabLive = 3; // Live module (lib/live_app)
   static const int tabCart = 4;
   static const int tabProfile = 5;
 
@@ -110,7 +110,7 @@ class _DashboardPageState extends State<DashboardPage> {
             const NavigationDestination(
               icon: Icon(Icons.live_tv_outlined),
               selectedIcon: Icon(Icons.live_tv, color: Color(0xFFFF5722)),
-              label: 'Live',
+              label: 'Live & Video',
             ),
             NavigationDestination(
               icon: _buildCartIcon(selected: false),
