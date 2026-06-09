@@ -18,6 +18,7 @@ import 'package:video_player/video_player.dart';
 
 import 'package:tropia_mobile_app_android/live_app/core/constants/app_constants.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/models/video_model.dart';
+import 'package:tropia_mobile_app_android/live_app/features/video/widgets/initials_avatar.dart';
 
 class VideoPlayerItem extends StatefulWidget {
   final VideoPost video;
@@ -326,6 +327,7 @@ class _ActionRail extends StatelessWidget {
           // Avatar + theo dõi đều ưu tiên SHOP khi video có shop (ngược lại
           // CREATOR) — avatar shop lấy từ shops.logo_url qua API.
           avatarUrl: video.displayAvatarUrl,
+          displayName: video.displayName,
           following: video.isFollowed,
           onTapAvatar: onOpenProfile,
           onTapFollow: onFollow,
@@ -366,12 +368,14 @@ class _ActionRail extends StatelessWidget {
 
 class _AvatarWithFollow extends StatelessWidget {
   final String? avatarUrl;
+  final String displayName;
   final bool following;
   final VoidCallback onTapAvatar;
   final VoidCallback onTapFollow;
 
   const _AvatarWithFollow({
     required this.avatarUrl,
+    required this.displayName,
     required this.following,
     required this.onTapAvatar,
     required this.onTapFollow,
@@ -395,14 +399,12 @@ class _AvatarWithFollow extends StatelessWidget {
                 shape: BoxShape.circle,
                 border: Border.all(color: Colors.white, width: 1.5),
               ),
-              child: ClipOval(
-                child: avatarUrl != null
-                    ? CachedNetworkImage(
-                        imageUrl: avatarUrl!,
-                        fit: BoxFit.cover,
-                        errorWidget: (_, __, ___) => _fallbackAvatar(),
-                      )
-                    : _fallbackAvatar(),
+              // Logo shop / avatar creator; fallback initials cục bộ khi ảnh
+              // ngoài (ui-avatars) bị CORS chặn trên web. radius 24 → 48px.
+              child: InitialsAvatar(
+                imageUrl: avatarUrl,
+                name: displayName,
+                radius: 24,
               ),
             ),
           ),
@@ -426,11 +428,6 @@ class _AvatarWithFollow extends StatelessWidget {
       ),
     );
   }
-
-  Widget _fallbackAvatar() => Container(
-    color: AppColors.primaryContainer,
-    child: const Icon(Icons.person, color: AppColors.primary, size: 26),
-  );
 }
 
 class _RailButton extends StatelessWidget {
@@ -675,10 +672,21 @@ class _CouponStrip extends StatelessWidget {
           GestureDetector(
             onTap: () => _copy(context, c),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: AppSizes.sm, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: AppSizes.sm, vertical: 5),
               decoration: BoxDecoration(
-                color: AppColors.secondary.withValues(alpha: 0.92),
+                gradient: const LinearGradient(
+                  colors: [AppColors.secondaryLight, AppColors.secondaryDark],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
                 borderRadius: BorderRadius.circular(AppSizes.radiusSm),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.22),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -806,14 +814,21 @@ class _MiniProductCard extends StatelessWidget {
             // Thanh flash-sale (Giảm X% + countdown) — chỉ khi đang flash sale.
             if (flash) _FlashSaleBar(product: product),
             Container(
-              padding: const EdgeInsets.all(AppSizes.xs),
+              padding: const EdgeInsets.all(6),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.96),
+                color: Colors.white,
                 borderRadius: flash
                     ? const BorderRadius.vertical(
                         bottom: Radius.circular(AppSizes.radiusMd),
                       )
                     : BorderRadius.circular(AppSizes.radiusMd),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.28),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -823,8 +838,8 @@ class _MiniProductCard extends StatelessWidget {
                       ClipRRect(
                         borderRadius: BorderRadius.circular(AppSizes.radiusSm),
                         child: SizedBox(
-                          width: 44,
-                          height: 44,
+                          width: 46,
+                          height: 46,
                           child: img != null
                               ? CachedNetworkImage(
                                   imageUrl: img,
@@ -1096,8 +1111,19 @@ class _ViewProductsChip extends StatelessWidget {
           vertical: 6,
         ),
         decoration: BoxDecoration(
-          color: AppColors.secondary,
+          gradient: const LinearGradient(
+            colors: [AppColors.secondaryLight, AppColors.secondaryDark],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
           borderRadius: BorderRadius.circular(AppSizes.radiusFull),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.22),
+              blurRadius: 6,
+              offset: const Offset(0, 2),
+            ),
+          ],
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,

@@ -1,4 +1,3 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -15,6 +14,7 @@ import 'package:tropia_mobile_app_android/live_app/features/user/providers/user_
 import 'package:tropia_mobile_app_android/live_app/features/user/screens/login_screen.dart';
 import 'package:tropia_mobile_app_android/live_app/features/user/screens/my_profile_screen.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/models/video_model.dart';
+import 'package:tropia_mobile_app_android/live_app/features/video/widgets/initials_avatar.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/providers/video_provider.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/screens/video_create_screen.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/screens/video_feed_screen.dart';
@@ -899,24 +899,14 @@ class _FollowedShopAvatar extends StatelessWidget {
                     color: Colors.white,
                   ),
                 ),
-                // Avatar
-                ClipOval(
-                  child: CachedNetworkImage(
-                    imageUrl: stream.sellerAvatarUrl,
-                    width: 57,
-                    height: 57,
-                    fit: BoxFit.cover,
-                    errorWidget: (_, __, ___) => Container(
-                      width: 57,
-                      height: 57,
-                      color: AppColors.primaryContainer,
-                      child: const Icon(
-                        Icons.storefront,
-                        color: AppColors.primary,
-                        size: 24,
-                      ),
-                    ),
-                  ),
+                // Avatar — dùng chung InitialsAvatar nên fallback ra chữ-cái-
+                // đầu của tên shop (giống card live ở dưới), không phải icon
+                // storefront generic → hai chỗ không còn "trên một đằng dưới
+                // một nẻo".
+                InitialsAvatar(
+                  imageUrl: stream.sellerAvatarUrl,
+                  name: stream.sellerName,
+                  radius: 57 / 2,
                 ),
                 // Badge LIVE đỏ bên dưới avatar
                 Positioned(

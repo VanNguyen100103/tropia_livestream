@@ -46,6 +46,7 @@ const (
 	ActionChatAutoMute      = "chat.auto_mute"
 	ActionStreamKeyIssue    = "stream_key.issue"
 	ActionRoleChange        = "user.role_change"
+	ActionLoyaltyCredit     = "user.loyalty_credit"
 	ActionLoginSuccess      = "auth.login"
 	ActionPaymentRefund     = "payment.refund"
 )

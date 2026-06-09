@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -226,6 +227,137 @@ func (h *Handler) LoginSpec(c *gin.Context) {
 			"so_dien_thoai": phone,
 		},
 	})
+}
+
+// registerSpecReq is the mobile register body. `username` carries the email
+// the user typed into the app's "Tên đăng nhập (Username)" field; `email` is
+// also sent but may be blank, so we fall back to username. Field names match
+// the spec user shape (full_name / so_dien_thoai).
+type registerSpecReq struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	FullName string `json:"full_name"`
+	Phone    string `json:"so_dien_thoai"`
+	Password string `json:"password" binding:"required"`
+}
+
+// RegisterSpec implements the mobile `POST /api/register` (alias of the web
+// /api/auth/register). It accepts the app's field names, creates the account
+// via the shared Register service, force-verifies the email (the spec flow
+// has no OTP screen — register is immediately followed by login), and returns
+// the spec user shape at HTTP 200 so the app's AuthModel.fromJson parses a
+// non-null `data`.
+func (h *Handler) RegisterSpec(c *gin.Context) {
+	var req registerSpecReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(httpx.NewValidation(err.Error(), nil))
+		return
+	}
+	username := strings.TrimSpace(req.Username)
+	emailIn := strings.TrimSpace(req.Email)
+	phoneIn := strings.TrimSpace(req.Phone)
+
+	// The app's "username" is the primary login credential, but profiles is
+	// keyed on a unique email and login resolves only by email/phone — so the
+	// username must be an email or a phone. A phone-based signup gets a
+	// deterministic internal email; the user then logs in with their phone.
+	var email, phone string
+	phonePrimary := false
+	switch {
+	case isEmailAddr(emailIn):
+		email, phone = emailIn, phoneIn
+	case isEmailAddr(username):
+		email, phone = username, phoneIn
+	case looksLikePhone(username):
+		phone, email, phonePrimary = username, phoneEmail(username), true
+	case looksLikePhone(phoneIn):
+		phone, email, phonePrimary = phoneIn, phoneEmail(phoneIn), true
+	default:
+		c.Error(httpx.NewValidation("Tên đăng nhập phải là email hoặc số điện thoại", nil))
+		return
+	}
+
+	name := strings.TrimSpace(req.FullName)
+	if name == "" {
+		c.Error(httpx.NewValidation("Vui lòng nhập họ và tên", nil))
+		return
+	}
+
+	// Phone isn't UNIQUE in the schema; reject a phone that already has an
+	// account so phone-login stays unambiguous.
+	if phonePrimary {
+		if _, err := h.svc.repo.FindByPhone(c.Request.Context(), phone); err == nil {
+			c.Error(httpx.NewConflict("số điện thoại đã được đăng ký"))
+			return
+		}
+	}
+
+	res, err := h.svc.Register(c.Request.Context(), RegisterInput{
+		Email:    email,
+		Password: req.Password,
+		Name:     name,
+		Phone:    phone,
+	})
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	// No OTP screen in the mobile flow — make the account loginable now.
+	if err := h.svc.MarkVerified(c.Request.Context(), res.User.ID); err != nil {
+		c.Error(err)
+		return
+	}
+	seq, _ := h.svc.repo.SeqByID(c.Request.Context(), res.User.ID)
+	outPhone := ""
+	if res.User.Phone != nil {
+		outPhone = *res.User.Phone
+	}
+	loginName := outPhone
+	if loginName == "" {
+		loginName = res.User.Email
+	}
+	httpx.SetMessage(c, "Đăng ký thành công")
+	c.JSON(http.StatusOK, gin.H{
+		"user": gin.H{
+			"id":            seq,
+			"username":      loginName,
+			"email":         res.User.Email,
+			"full_name":     res.User.Name,
+			"so_dien_thoai": outPhone,
+		},
+	})
+}
+
+// isEmailAddr reports whether s parses as a bare email address.
+func isEmailAddr(s string) bool {
+	if s == "" {
+		return false
+	}
+	_, err := mail.ParseAddress(s)
+	return err == nil
+}
+
+// looksLikePhone reports whether s is a bare phone number — an optional
+// leading '+' followed by 8–15 digits. Non-email usernames are resolved by
+// phone at login (LoginByUsername → FindByPhone).
+func looksLikePhone(s string) bool {
+	s = strings.TrimPrefix(s, "+")
+	if len(s) < 8 || len(s) > 15 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// phoneEmail derives the deterministic internal email for a phone-only
+// signup. It satisfies the profiles.email NOT NULL UNIQUE constraint without
+// ever being shown to the user (who logs in with the phone itself).
+func phoneEmail(phone string) string {
+	return strings.TrimPrefix(phone, "+") + "@phone.tropia.local"
 }
 
 func (h *Handler) refresh(c *gin.Context) {

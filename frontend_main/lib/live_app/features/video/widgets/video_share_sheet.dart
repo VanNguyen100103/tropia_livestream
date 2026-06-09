@@ -79,7 +79,9 @@ class _VideoShareSheet extends StatelessWidget {
 
   String get _shareText {
     final caption = (video.caption?.isNotEmpty ?? false) ? '\n${video.caption}' : '';
-    return 'Xem video của @${video.displayName} trên Tropia$caption\n${video.playUrl}';
+    // shareUrl = bản đã bake overlay (fallback clip thô) → người mở link ngoài
+    // app thấy thông tin burn sẵn trên video, không phải clip trần.
+    return 'Xem video của @${video.displayName} trên Tropia$caption\n${video.shareUrl}';
   }
 
   Future<void> _shareNative(BuildContext context) async {
@@ -89,7 +91,7 @@ class _VideoShareSheet extends StatelessWidget {
   }
 
   Future<void> _copyLink(BuildContext context) async {
-    await Clipboard.setData(ClipboardData(text: video.playUrl));
+    await Clipboard.setData(ClipboardData(text: video.shareUrl));
     if (!context.mounted) return;
     Navigator.pop(context);
     _toast(context, 'Đã sao chép đường dẫn');

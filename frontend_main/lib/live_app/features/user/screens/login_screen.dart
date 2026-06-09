@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:tropia_mobile_app_android/live_app/core/constants/app_constants.dart';
 import 'package:tropia_mobile_app_android/live_app/core/services/auth_service.dart';
 import 'package:tropia_mobile_app_android/live_app/core/utils/logger.dart';
-import 'package:tropia_mobile_app_android/live_app/shell/main_screen.dart';
 
 const _tag = 'LoginScreen';
 
@@ -78,10 +77,12 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       AppLogger.logUserEvent(action: 'login_success', context: _tag);
       if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const MainScreen()),
-          (_) => false,
-        );
+        // Pop back to wherever LoginScreen was pushed from (the dashboard's
+        // "Live & Video" tab) instead of replacing the whole stack with the
+        // standalone 5-tab MainScreen. Keeps the app on the unified 6-tab
+        // dashboard shell — the callers that pushed LoginScreen re-read the
+        // now signed-in AuthService (via UserProvider listener) on resume.
+        Navigator.of(context).pop();
       }
     } on DioException catch (e) {
       _showError(_apiError(e, 'Lỗi kết nối máy chủ'));
@@ -479,10 +480,11 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
         password: widget.password,
       );
       if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const MainScreen()),
-          (_) => false,
-        );
+        // Same as the login flow: return to the dashboard's Live tab rather
+        // than swapping in the standalone 5-tab MainScreen shell. The OTP
+        // screen replaced LoginScreen via pushReplacement, so a single pop
+        // lands back on the screen that opened the auth flow.
+        Navigator.of(context).pop();
       }
     } on DioException catch (e) {
       _showError(_apiError(e, 'Mã OTP không đúng'));
@@ -640,9 +642,11 @@ class _VerifyEmailScreenState extends State<VerifyEmailScreen> {
                 ),
 
               TextButton(
-                onPressed: () => Navigator.of(context).pushAndRemoveUntil(
+                // Replace this OTP screen with a fresh LoginScreen, keeping the
+                // dashboard at the stack root so a later successful login can
+                // pop straight back to the Live tab (6-tab shell preserved).
+                onPressed: () => Navigator.of(context).pushReplacement(
                   MaterialPageRoute(builder: (_) => const LoginScreen()),
-                  (_) => false,
                 ),
                 child: const Text(
                   'Quay lại đăng nhập',

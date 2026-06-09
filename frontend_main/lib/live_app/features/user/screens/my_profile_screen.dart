@@ -995,7 +995,7 @@ class _MyVideosViewerState extends State<_MyVideosViewer> {
 
   Future<void> _share(int i) async {
     final v = _videos[i];
-    await Share.share('Xem video của @${v.displayName} trên Tropia\n${v.playUrl}');
+    await Share.share('Xem video của @${v.displayName} trên Tropia\n${v.shareUrl}');
     _replace(i, _videos[i].copyWith(shareCount: _videos[i].shareCount + 1));
     await widget.repo.incShare(v.id);
   }
@@ -1082,7 +1082,9 @@ class _MyVideosViewerState extends State<_MyVideosViewer> {
         builder: (_) => CreatorProfileScreen(
           userId: v.userId,
           displayName: v.displayName,
-          avatarUrl: v.avatarUrl,
+          avatarUrl: v.displayAvatarUrl,
+          shopId: v.shopId,
+          shopSlug: v.shopSlug,
           following: v.isFollowed,
         ),
       ),

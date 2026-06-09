@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,19 @@ type FeedOverlayInput struct {
 	CouponLabels  []string // pre-formatted, e.g. "Giảm 5%"
 	WatermarkText string   // bottom-right provenance mark; "" ⇒ "TROPIA"
 	Logger        *slog.Logger
+
+	// Action-rail fields — a static mirror of the feed's right-edge rail, baked
+	// so the shared/downloaded copy still reads as a Tropia Video. Counts are a
+	// SNAPSHOT at bake time (a fresh clip's are ~0, so only icons show — we never
+	// stamp a stale number). AvatarURL feeds the rail head + follow (+) badge.
+	AvatarURL    string
+	LikeCount    int
+	CommentCount int
+	ShareCount   int
+
+	// ShopHasVoucher → a static "Mua với Voucher" pill under the product card
+	// (the tappable one stays live Flutter UI in-app).
+	ShopHasVoucher bool
 }
 
 // RenderFeedOverlay draws the static info layer into a single transparent PNG
@@ -38,7 +52,7 @@ type FeedOverlayInput struct {
 // raw clip in one FFmpeg pass. The layout mirrors the feed's bottom-left
 // column: voucher pills → product card → "@handle" → caption → hashtags, with
 // a bottom scrim for legibility and the watermark in the corner.
-func RenderFeedOverlay(_ context.Context, in FeedOverlayInput, outPath string) error {
+func RenderFeedOverlay(ctx context.Context, in FeedOverlayInput, outPath string) error {
 	if in.Logger == nil {
 		in.Logger = slog.Default()
 	}
@@ -76,22 +90,37 @@ func RenderFeedOverlay(_ context.Context, in FeedOverlayInput, outPath string) e
 	priceFace, _ := loadFace(34 * scale)
 	pillFace, _ := loadFace(24 * scale)
 	wmFace, _ := loadFace(26 * scale)
+	countFace, _ := loadFace(24 * scale) // action-rail like/comment/share counts
+	badgeFace, _ := loadFace(13 * scale) // "FLASH SALE" tag across the card image
 
-	// ── Voucher pills (above the product card) ──
-	pillY := H * 0.55
+	// ── Voucher pills + product card ──
+	// Anchor the card, then tuck the voucher pills just above it with a small
+	// gap (mirrors the feed's CouponStrip → card spacing) instead of floating
+	// them high above the card. pillH must match drawPill's pill height.
+	cardTop := H * 0.60
+	pillH := 44 * scale
 	if len(in.CouponLabels) > 0 {
-		drawPillRow(dc, in.CouponLabels, margin, pillY, scale, pillFace, color.RGBA{255, 70, 30, 235})
+		drawPillRow(dc, in.CouponLabels, margin, cardTop-pillH-8*scale, scale, pillFace)
 	}
 
-	// ── Product card ──
-	cardTop := H * 0.60
 	if len(in.Products) > 0 {
-		cardH := drawFeedProductCard(dc, in.Products[0], margin, cardTop, blockW, scale, nameFace, priceFace)
+		cardH := drawFeedProductCard(dc, in.Products[0], margin, cardTop, blockW, scale, nameFace, priceFace, badgeFace)
+		// CTA row under the card: "Mua với Voucher" (when the shop runs a voucher)
+		// then "Xem sản phẩm (n)" (when >1 product). Static mirrors of the feed's
+		// tappable buttons, which stay live Flutter UI over the raw clip in-app —
+		// same brand-orange gradient pills as the in-app chips.
+		ctaY := cardTop + cardH + 12*scale
+		cx := margin
+		if in.ShopHasVoucher {
+			cx += drawPill(dc, "Mua với Voucher", cx, ctaY, scale, pillFace) + 10*scale
+		}
 		if len(in.Products) > 1 {
-			drawPillRow(dc, []string{fmt.Sprintf("Xem sản phẩm (%d)", len(in.Products))},
-				margin, cardTop+cardH+12*scale, scale, pillFace, color.RGBA{0, 0, 0, 150})
+			drawPill(dc, fmt.Sprintf("Xem sản phẩm (%d)", len(in.Products)), cx, ctaY, scale, pillFace)
 		}
 	}
+
+	// ── Action rail (right edge) ──
+	drawActionRail(ctx, dc, in, W, H, scale, countFace)
 
 	// ── Handle / caption / hashtags (bottom-left) ──
 	y := H * 0.82
@@ -100,16 +129,21 @@ func RenderFeedOverlay(_ context.Context, in FeedOverlayInput, outPath string) e
 		drawShadowString(dc, h, margin, y)
 		y += 44 * scale
 	}
-	if caption := strings.TrimSpace(in.Caption); caption != "" {
+	if caption := truncateRunes(strings.TrimSpace(in.Caption), 120); caption != "" {
 		dc.SetFontFace(captionFace)
-		drawShadowWrapped(dc, truncateRunes(caption, 120), margin, y, blockW, scale)
-		// Reserve up to two lines for the caption.
-		y += 38 * scale * minF(2, float64(lineCount(caption, 48)))
+		drawShadowWrapped(dc, caption, margin, y, blockW, scale)
+		// Advance by the caption's ACTUAL wrapped height (measured at blockW)
+		// so the hashtag line below never overlaps it. The old fixed 1–2 line
+		// estimate undercounted on a narrow block and stacked the tags on top
+		// of the caption's last line.
+		_, capH := dc.MeasureMultilineString(strings.Join(dc.WordWrap(caption, blockW), "\n"), 1.2)
+		y += capH + 8*scale
 	}
-	if len(in.Hashtags) > 0 {
+	// Drop hashtags already written inline in the caption so they don't render
+	// twice (creators often end the caption with the same #tag).
+	if tags := hashtagsNotInCaption(in.Caption, in.Hashtags); len(tags) > 0 {
 		dc.SetFontFace(tagFace)
-		tags := "#" + strings.Join(in.Hashtags, " #")
-		drawShadowString(dc, truncateRunes(tags, 60), margin, y+6*scale)
+		drawShadowString(dc, truncateRunes("#"+strings.Join(tags, " #"), 60), margin, y)
 	}
 
 	// ── Watermark (bottom-right) ──
@@ -119,20 +153,26 @@ func RenderFeedOverlay(_ context.Context, in FeedOverlayInput, outPath string) e
 	}
 	dc.SetFontFace(wmFace)
 	tw, _ := dc.MeasureString(wm)
-	drawShadowStringColor(dc, wm, W-tw-margin, H-margin, color.RGBA{255, 255, 255, 200})
+	// Translucent white, premultiplied (R=G=B=A) so it stays a valid colour —
+	// see the voucher-pill note above re: Go's alpha-premultiplied color.RGBA.
+	drawShadowStringColor(dc, wm, W-tw-margin, H-margin, color.RGBA{200, 200, 200, 200})
 
 	return savePNG(dc, outPath)
 }
 
 // drawFeedProductCard draws one white rounded card (image + name + price) and
 // returns its height. Mirrors the feed's product card.
-func drawFeedProductCard(dc *gg.Context, p Product, x, y, w, scale float64, nameFace, priceFace font.Face) float64 {
+func drawFeedProductCard(dc *gg.Context, p Product, x, y, w, scale float64, nameFace, priceFace, flashFace font.Face) float64 {
 	cardH := 100 * scale
 	imgSize := 76 * scale
 	pad := 12 * scale
 
+	// Soft drop-shadow so the white card lifts off a bright clip (mirrors the
+	// in-app card's BoxShadow).
+	drawSoftShadow(dc, x, y, w, cardH, 14*scale, scale)
+
 	// Card background.
-	dc.SetRGBA(1, 1, 1, 0.96)
+	dc.SetRGB(1, 1, 1)
 	dc.DrawRoundedRectangle(x, y, w, cardH, 14*scale)
 	dc.Fill()
 
@@ -149,6 +189,20 @@ func drawFeedProductCard(dc *gg.Context, p Product, x, y, w, scale float64, name
 	}
 	dc.ResetClip()
 
+	// Flash-sale tag across the TOP of the card image (Shopee-style), so it never
+	// reaches into the product name on the right. Static — the live countdown
+	// stays Flutter UI in-app; a frozen timer in a baked clip would lie, so we
+	// only mark THAT a flash sale is on, not how long is left.
+	if p.Flash && flashFace != nil {
+		bh := 24 * scale
+		dc.SetRGB255(255, 70, 30)
+		dc.DrawRoundedRectangle(imgX, imgY, imgSize, bh, 7*scale)
+		dc.Fill()
+		dc.SetFontFace(flashFace)
+		dc.SetRGB(1, 1, 1)
+		dc.DrawStringAnchored("FLASH SALE", imgX+imgSize/2, imgY+bh/2, 0.5, 0.42)
+	}
+
 	textX := imgX + imgSize + pad
 	textW := x + w - textX - pad
 
@@ -160,30 +214,202 @@ func drawFeedProductCard(dc *gg.Context, p Product, x, y, w, scale float64, name
 	// Price (red, bottom-aligned).
 	dc.SetFontFace(priceFace)
 	dc.SetRGB255(229, 57, 53)
-	dc.DrawString(fmt.Sprintf("%.0fđ", p.SalePrice), textX, y+cardH-pad)
+	dc.DrawString(FormatVND(p.SalePrice), textX, y+cardH-pad)
 
 	return cardH
 }
 
-// drawPillRow lays out one or more rounded label pills left-to-right.
-func drawPillRow(dc *gg.Context, labels []string, x, y, scale float64, face font.Face, bg color.RGBA) {
+// Brand-orange gradient for the baked CTA / voucher pills, matching the Flutter
+// feed chips (secondaryLight #FF8A65 → secondaryDark #E64A19). A=255 keeps the
+// colours valid under Go's alpha-premultiplied color.RGBA.
+var (
+	pillOrangeTop = color.RGBA{255, 138, 101, 255}
+	pillOrangeBot = color.RGBA{230, 74, 25, 255}
+)
+
+// drawPill draws one rounded brand-orange gradient label pill at (x,y) with a
+// soft drop-shadow, and returns its width so a caller can lay several out
+// left-to-right with its own spacing.
+func drawPill(dc *gg.Context, label string, x, y, scale float64, face font.Face) float64 {
 	if face == nil {
-		return
+		return 0
 	}
 	dc.SetFontFace(face)
-	cx := x
 	h := 44 * scale
 	padX := 16 * scale
+	tw, _ := dc.MeasureString(label)
+	pw := tw + padX*2
+
+	drawSoftShadow(dc, x, y, pw, h, h/2, scale)
+
+	grad := gg.NewLinearGradient(x, y, x, y+h)
+	grad.AddColorStop(0, pillOrangeTop)
+	grad.AddColorStop(1, pillOrangeBot)
+	dc.SetFillStyle(grad)
+	dc.DrawRoundedRectangle(x, y, pw, h, h/2)
+	dc.Fill()
+
+	dc.SetRGB(1, 1, 1)
+	dc.DrawStringAnchored(label, x+pw/2, y+h/2, 0.5, 0.4)
+	return pw
+}
+
+// drawPillRow lays out one or more gradient pills left-to-right.
+func drawPillRow(dc *gg.Context, labels []string, x, y, scale float64, face font.Face) {
+	cx := x
 	for _, label := range labels {
-		tw, _ := dc.MeasureString(label)
-		pw := tw + padX*2
-		dc.SetColor(bg)
-		dc.DrawRoundedRectangle(cx, y, pw, h, h/2)
-		dc.Fill()
-		dc.SetRGB(1, 1, 1)
-		dc.DrawStringAnchored(label, cx+pw/2, y+h/2, 0.5, 0.4)
-		cx += pw + 10*scale
+		cx += drawPill(dc, label, cx, y, scale, face) + 10*scale
 	}
+}
+
+// drawSoftShadow fakes a blurred drop-shadow under a rounded rect by stacking a
+// few translucent, progressively larger rounded rects offset slightly downward.
+// gg has no Gaussian blur, so this is a cheap approximation that still reads as
+// depth over a bright clip.
+func drawSoftShadow(dc *gg.Context, x, y, w, h, r, scale float64) {
+	for i := 0; i < 4; i++ {
+		grow := float64(i) * 1.6 * scale
+		dc.SetRGBA(0, 0, 0, 0.06)
+		dc.DrawRoundedRectangle(x-grow, y-grow+4*scale, w+2*grow, h+2*grow, r+grow)
+		dc.Fill()
+	}
+}
+
+// ── Action rail ──────────────────────────────────────────────────────────────
+
+// drawActionRail bakes a static copy of the feed's right-edge action rail:
+// creator avatar (with a red follow "+"), then heart / comment / share glyphs,
+// each with its snapshot count below. Icons are drawn white with a soft dark
+// drop-shadow so they stay legible over a bright clip.
+func drawActionRail(ctx context.Context, dc *gg.Context, in FeedOverlayInput, W, H, scale float64, countFace font.Face) {
+	cx := W - 0.045*W - 30*scale // center x of the rail
+	slot := 92 * scale           // vertical gap between icon slots
+	bottomY := H * 0.74          // share icon (bottom of the stack) center
+	isz := 38 * scale            // nominal glyph size
+	shadow := color.RGBA{0, 0, 0, 110}
+
+	// Avatar head + follow (+) at the top of the stack.
+	drawRailAvatar(ctx, dc, in.AvatarURL, cx, bottomY-3*slot, 30*scale, scale)
+
+	rows := []struct {
+		y     float64
+		kind  string
+		count int
+	}{
+		{bottomY - 2*slot, "heart", in.LikeCount},
+		{bottomY - 1*slot, "comment", in.CommentCount},
+		{bottomY, "share", in.ShareCount},
+	}
+	for _, r := range rows {
+		dc.SetColor(shadow)
+		drawRailGlyph(dc, r.kind, cx+2*scale, r.y+2*scale, isz)
+		dc.SetRGB(1, 1, 1)
+		drawRailGlyph(dc, r.kind, cx, r.y, isz)
+		if label := compactCount(r.count); label != "" && countFace != nil {
+			dc.SetFontFace(countFace)
+			tw, _ := dc.MeasureString(label)
+			drawShadowStringColor(dc, label, cx-tw/2, r.y+isz*0.95, color.RGBA{255, 255, 255, 255})
+		}
+	}
+}
+
+// drawRailGlyph dispatches to the per-icon vector drawer using the current
+// fill/stroke colour (so the caller can paint a shadow pass then a white pass).
+func drawRailGlyph(dc *gg.Context, kind string, cx, cy, s float64) {
+	switch kind {
+	case "heart":
+		drawHeart(dc, cx, cy, s)
+	case "comment":
+		drawCommentIcon(dc, cx, cy, s)
+	case "share":
+		drawShareIcon(dc, cx, cy, s)
+	}
+}
+
+// drawRailAvatar draws the round creator/shop avatar (or a grey disc on miss)
+// with a thin white ring and a red "+" follow badge centred on its bottom edge.
+func drawRailAvatar(ctx context.Context, dc *gg.Context, url string, cx, cy, r, scale float64) {
+	dc.SetRGB(1, 1, 1) // white ring
+	dc.DrawCircle(cx, cy, r+2.5*scale)
+	dc.Fill()
+
+	dc.DrawCircle(cx, cy, r)
+	dc.Clip()
+	if img := fetchImage(ctx, url); img != nil {
+		dc.DrawImageAnchored(scaleToFill(img, int(r*2), int(r*2)), int(cx), int(cy), 0.5, 0.5)
+	} else {
+		dc.SetRGB255(190, 190, 190)
+		dc.DrawCircle(cx, cy, r)
+		dc.Fill()
+	}
+	dc.ResetClip()
+
+	bcy := cy + r // follow (+) badge on the bottom edge
+	dc.SetRGB255(255, 77, 79)
+	dc.DrawCircle(cx, bcy, 11*scale)
+	dc.Fill()
+	dc.SetRGB(1, 1, 1)
+	dc.SetLineWidth(2.4 * scale)
+	dc.DrawLine(cx-5*scale, bcy, cx+5*scale, bcy)
+	dc.DrawLine(cx, bcy-5*scale, cx, bcy+5*scale)
+	dc.Stroke()
+}
+
+// drawHeart fills a heart (two top lobes + a bottom triangle) centred at (cx,cy)
+// roughly s tall, using the current colour.
+func drawHeart(dc *gg.Context, cx, cy, s float64) {
+	r := s * 0.30
+	dc.DrawCircle(cx-r, cy-r*0.5, r)
+	dc.DrawCircle(cx+r, cy-r*0.5, r)
+	dc.Fill()
+	dc.MoveTo(cx-2*r, cy-r*0.2)
+	dc.LineTo(cx+2*r, cy-r*0.2)
+	dc.LineTo(cx, cy+1.7*r)
+	dc.ClosePath()
+	dc.Fill()
+}
+
+// drawCommentIcon fills a rounded speech bubble with a small bottom-left tail.
+func drawCommentIcon(dc *gg.Context, cx, cy, s float64) {
+	w, h := s*1.15, s*0.95
+	dc.DrawRoundedRectangle(cx-w/2, cy-h/2-s*0.08, w, h, s*0.28)
+	dc.Fill()
+	dc.MoveTo(cx-w*0.18, cy+h*0.34)
+	dc.LineTo(cx-w*0.42, cy+h*0.62)
+	dc.LineTo(cx-w*0.02, cy+h*0.34)
+	dc.ClosePath()
+	dc.Fill()
+}
+
+// drawShareIcon strokes a curved shaft + a filled arrowhead (a "↪" send mark).
+func drawShareIcon(dc *gg.Context, cx, cy, s float64) {
+	dc.SetLineWidth(s * 0.16)
+	dc.MoveTo(cx-s*0.55, cy+s*0.35)
+	dc.QuadraticTo(cx-s*0.1, cy-s*0.45, cx+s*0.42, cy-s*0.3)
+	dc.Stroke()
+	dc.MoveTo(cx+s*0.10, cy-s*0.55)
+	dc.LineTo(cx+s*0.55, cy-s*0.28)
+	dc.LineTo(cx+s*0.10, cy-s*0.02)
+	dc.ClosePath()
+	dc.Fill()
+}
+
+// compactCount formats a counter the way the feed rail does: "" for 0 (icon
+// only — never a stale number), the raw value under 1 000, else "1,2K" / "3,4M"
+// (comma decimal, matching Vietnamese).
+func compactCount(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	v, suffix := float64(n)/1000, "K"
+	if n >= 1_000_000 {
+		v, suffix = float64(n)/1_000_000, "M"
+	}
+	s := strings.Replace(strings.TrimSuffix(strconv.FormatFloat(v, 'f', 1, 64), ".0"), ".", ",", 1)
+	return s + suffix
 }
 
 // drawShadowString draws white text with a soft dark drop-shadow for legibility.
@@ -205,20 +431,19 @@ func drawShadowWrapped(dc *gg.Context, s string, x, y, w, _ float64) {
 	dc.DrawStringWrapped(s, x, y, 0, 0, w, 1.2, gg.AlignLeft)
 }
 
-func minF(a, b float64) float64 {
-	if a < b {
-		return a
+// hashtagsNotInCaption returns the tags whose "#tag" doesn't already appear in
+// caption (case-insensitive), so the baked hashtag line doesn't repeat what the
+// caption already shows inline (creators often end the caption with the tag).
+func hashtagsNotInCaption(caption string, tags []string) []string {
+	capLower := strings.ToLower(caption)
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if strings.Contains(capLower, "#"+strings.ToLower(t)) {
+			continue
+		}
+		out = append(out, t)
 	}
-	return b
-}
-
-// lineCount estimates how many wrapped lines a string spans at ~charsPerLine.
-func lineCount(s string, charsPerLine int) int {
-	n := (len([]rune(s)) + charsPerLine - 1) / charsPerLine
-	if n < 1 {
-		return 1
-	}
-	return n
+	return out
 }
 
 // ── FFmpeg compositing ──────────────────────────────────────────────────────

@@ -28,6 +28,12 @@ class VideoPost {
   final String userId;
   final String? shopId;
   final String videoUrl;
+
+  /// Bản clip đã bake lớp overlay tĩnh (shop handle + caption + sản phẩm +
+  /// voucher + watermark) do worker tạo async, dùng cho CHIA SẺ / tải ra ngoài
+  /// app — nơi không có UI Flutter vẽ đè nên cần thông tin burn sẵn vào video.
+  /// null khi chưa bake xong → share fallback về [videoUrl] (clip thô).
+  final String? overlayUrl;
   final String? thumbnailUrl;
   final String? caption;
   final List<String> hashtags;
@@ -67,6 +73,7 @@ class VideoPost {
     required this.userId,
     this.shopId,
     required this.videoUrl,
+    this.overlayUrl,
     this.thumbnailUrl,
     this.caption,
     this.hashtags = const [],
@@ -95,6 +102,14 @@ class VideoPost {
   /// URL phát video, đã ghép host. Rỗng nếu không phải http(s) hợp lệ
   /// (chặn các scheme lạ như file:/data:/javascript: trước khi đưa vào player).
   String get playUrl => _resolveHttp(videoUrl);
+
+  /// URL dùng khi CHIA SẺ / SAO CHÉP đường dẫn ra ngoài app: ưu tiên bản đã
+  /// bake overlay (để người mở link ngoài app vẫn thấy info burn sẵn trên
+  /// video), fallback về clip thô [playUrl] khi overlay chưa bake xong / lỗi.
+  String get shareUrl {
+    final o = _resolveHttp(overlayUrl ?? '');
+    return o.isNotEmpty ? o : playUrl;
+  }
 
   /// URL ảnh bìa (đã ghép host), null nếu không có / không hợp lệ.
   String? get thumbUrl => _nullable(_resolveHttp(thumbnailUrl ?? ''));
@@ -134,6 +149,7 @@ class VideoPost {
       userId: json['user_id'] as String? ?? '',
       shopId: json['shop_id'] as String?,
       videoUrl: json['video_url'] as String? ?? '',
+      overlayUrl: json['overlay_url'] as String?,
       thumbnailUrl: json['thumbnail_url'] as String?,
       caption: json['caption'] as String?,
       hashtags:
@@ -189,6 +205,7 @@ class VideoPost {
       userId: userId,
       shopId: shopId,
       videoUrl: videoUrl,
+      overlayUrl: overlayUrl,
       thumbnailUrl: thumbnailUrl,
       caption: caption,
       hashtags: hashtags,

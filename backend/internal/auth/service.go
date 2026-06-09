@@ -229,6 +229,15 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*Register
 	return &RegisterResult{User: user, OTP: otp}, nil
 }
 
+// MarkVerified force-verifies a freshly registered account and drops its
+// pending OTP. The mobile spec flow (POST /api/register → login) has no OTP
+// screen, so the account must be immediately loginable; completeLogin gates
+// on EmailVerified, which this clears.
+func (s *AuthService) MarkVerified(ctx context.Context, userID uuid.UUID) error {
+	s.rds.Del(ctx, "email_otp:"+userID.String())
+	return s.repo.MarkEmailVerified(ctx, userID)
+}
+
 func (s *AuthService) VerifyEmailOTP(ctx context.Context, email, otp string) error {
 	user, err := s.repo.FindByEmail(ctx, strings.ToLower(email))
 	if err != nil {

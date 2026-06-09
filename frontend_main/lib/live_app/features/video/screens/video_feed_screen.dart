@@ -111,7 +111,7 @@ class _VideoFeedScreenState extends State<VideoFeedScreen>
     );
     final caption = v.caption?.isNotEmpty ?? false ? '\n${v.caption}' : '';
     await Share.share(
-      'Xem video của @${v.displayName} trên Tropia$caption\n${v.playUrl}',
+      'Xem video của @${v.displayName} trên Tropia$caption\n${v.shareUrl}',
     );
     if (mounted) context.read<VideoProvider>().registerShare(v.id);
   }
@@ -139,8 +139,10 @@ class _VideoFeedScreenState extends State<VideoFeedScreen>
         builder: (_) => CreatorProfileScreen(
           userId: v.userId,
           displayName: v.displayName,
-          avatarUrl: v.avatarUrl,
-          following: v.following,
+          avatarUrl: v.displayAvatarUrl,
+          shopId: v.shopId,
+          shopSlug: v.shopSlug,
+          following: v.isFollowed,
         ),
       ),
     );

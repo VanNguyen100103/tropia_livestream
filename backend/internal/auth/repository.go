@@ -264,8 +264,14 @@ func (r *Repository) RevokeAllForUser(ctx context.Context, userID uuid.UUID) err
 // ---------- Shops (helper for seller registration) ----------
 
 func (r *Repository) CreateShopForSeller(ctx context.Context, sellerID uuid.UUID, name, slug string) error {
+	// Create the shop WITHOUT a logo (logo_url NULL): the client draws a
+	// name-based initials avatar locally (InitialsAvatar) so cards/videos show
+	// an avatar right away without an external image service. (A ui-avatars.com
+	// default used to live here but its broken CORS header blocked the image on
+	// Flutter Web.) The seller can upload a real logo later.
 	_, err := r.pool.Exec(ctx,
-		`INSERT INTO shops (seller_id, name, slug, is_active) VALUES ($1, $2, $3, TRUE)
+		`INSERT INTO shops (seller_id, name, slug, is_active)
+		 VALUES ($1, $2, $3, TRUE)
 		 ON CONFLICT (seller_id) DO NOTHING`,
 		sellerID, name, slug)
 	return err

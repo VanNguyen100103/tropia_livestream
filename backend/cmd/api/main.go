@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 
+	"github.com/tropia/backend/internal/admin"
 	"github.com/tropia/backend/internal/ai"
 	"github.com/tropia/backend/internal/audit"
 	"github.com/tropia/backend/internal/auth"
@@ -270,6 +271,13 @@ func main() {
 	loginAliasLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{Limit: 5, WindowMs: 60 * 1000, FailClosed: true})
 	router.POST("/api/login", loginAliasLimit, authH.LoginSpec)
 
+	// Spec register alias: POST /api/register with {username (email),
+	// full_name, so_dien_thoai, password} → creates + verifies account and
+	// returns the spec user shape. Mirrors /api/login so the mobile app's
+	// register-then-login flow works without an OTP screen.
+	registerAliasLimit := httpx.RateLimit(cc, httpx.RateLimitConfig{Limit: 3, WindowMs: 5 * 60 * 1000, FailClosed: true})
+	router.POST("/api/register", registerAliasLimit, authH.RegisterSpec)
+
 	googleOAuth := auth.NewGoogleOAuth(authSvc, rds, auth.GoogleOAuthConfig{
 		ClientID:     cfg.GoogleClientID,
 		ClientSecret: cfg.GoogleClientSecret,
@@ -410,6 +418,13 @@ func main() {
 	// these routes.
 	flashSaleH := flashsale.NewHandler(flashsale.NewRepository(db))
 	flashSaleH.Register(router.Group("/api"), authMw, adminMw)
+
+	// Admin user management — change a user's system role (buyer/seller/admin)
+	// and credit loyalty points. Admin-only (adminMw); every action is written
+	// to audit_log. Closes the "promote admins manually in DB" gap noted in
+	// auth.Register.
+	adminH := admin.NewHandler(admin.NewRepository(db), auditRepo)
+	adminH.Register(router.Group("/api/admin"), authMw, adminMw)
 
 	// Orders
 	orderH := commerce.NewOrderHandler(orderSvc, orderRepo)

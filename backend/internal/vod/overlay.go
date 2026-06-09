@@ -161,7 +161,7 @@ func RenderPinBanner(ctx context.Context, name string, price float64, imageURL s
 	}
 	dc.SetFontFace(priceFace)
 	dc.SetRGB255(229, 57, 53) // red 600
-	dc.DrawString(fmt.Sprintf("%.0fđ", price), textX, float64(pinBannerH)-10)
+	dc.DrawString(FormatVND(price), textX, float64(pinBannerH)-10)
 
 	return savePNG(dc, outPath)
 }
@@ -192,7 +192,7 @@ func RenderCouponBanner(discountType, code string, value float64, outPath string
 
 	label := fmt.Sprintf("Giảm %.0f%%", value)
 	if discountType != "percent" {
-		label = fmt.Sprintf("Giảm %.0fđ", value)
+		label = "Giảm " + FormatVND(value)
 	}
 	dc.DrawString(label, 20, 35)
 
@@ -295,6 +295,10 @@ type Product struct {
 	Name      string
 	SalePrice float64
 	ImageURL  string
+	// Flash marks the product as currently in a flash sale at bake time. Only
+	// the feed overlay uses it (to stamp a static "FLASH SALE" badge on the
+	// card); the replay's RenderProductList ignores it.
+	Flash bool
 }
 
 // RenderProductList draws a vertical stack of mini cards (image +
@@ -348,7 +352,7 @@ func RenderProductList(ctx context.Context, products []Product, outPath string) 
 		// Price (bottom, red).
 		dc.SetFontFace(priceFace)
 		dc.SetRGB255(229, 57, 53)
-		dc.DrawString(fmt.Sprintf("%.0fđ", p.SalePrice), imgX+imgSize+10, y+float64(prodCardH)-16)
+		dc.DrawString(FormatVND(p.SalePrice), imgX+imgSize+10, y+float64(prodCardH)-16)
 	}
 
 	return savePNG(dc, outPath)

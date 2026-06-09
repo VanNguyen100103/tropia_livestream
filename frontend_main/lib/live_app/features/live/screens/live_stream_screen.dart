@@ -20,6 +20,7 @@ import 'package:tropia_mobile_app_android/live_app/features/live/widgets/live_mi
 import 'package:tropia_mobile_app_android/live_app/features/live/widgets/live_product_card_widget.dart';
 import 'package:tropia_mobile_app_android/live_app/features/live/widgets/live_product_popup.dart';
 import 'package:tropia_mobile_app_android/live_app/features/shop/screens/shop_detail_screen.dart';
+import 'package:tropia_mobile_app_android/live_app/features/video/widgets/initials_avatar.dart';
 
 import '../widgets/viewer_unload_hook_stub.dart'
     if (dart.library.js_interop) '../widgets/viewer_unload_hook_web.dart';
@@ -623,17 +624,10 @@ class _TopBar extends StatelessWidget {
         GestureDetector(
           onTap: () => _openShop(context),
           behavior: HitTestBehavior.opaque,
-          child: ClipOval(
-            child: Image.network(
-              stream.sellerAvatarUrl,
-              width: 36,
-              height: 36,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Container(
-                width: 36, height: 36, color: Colors.grey,
-                child: const Icon(Icons.person, color: Colors.white70),
-              ),
-            ),
+          child: InitialsAvatar(
+            imageUrl: stream.sellerAvatarUrl,
+            name: stream.sellerName,
+            radius: 18,
           ),
         ),
         const SizedBox(width: 8),

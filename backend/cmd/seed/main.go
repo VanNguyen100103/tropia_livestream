@@ -317,6 +317,9 @@ func main() {
 	if err := seedLiveSession(ctx, pool); err != nil {
 		log.Fatalf("seedLiveSession: %v", err)
 	}
+	if err := seedLiveGiftCatalog(ctx, pool); err != nil {
+		log.Fatalf("seedLiveGiftCatalog: %v", err)
+	}
 
 	log.Println("")
 	log.Println("✅ seed complete")
@@ -364,27 +367,26 @@ func seedShops(ctx context.Context, pool *pgxpool.Pool) error {
 		"Tropia Fresh Market",
 		"tropia-fresh-market",
 		"Cửa hàng chính thức của Tropia — thực phẩm + lifestyle.",
-		"https://ui-avatars.com/api/?name=Tropia+Fresh+Market&background=0D9488&color=fff&size=256",
+		nil, // no logo: client draws a name-based initials avatar locally
 		"seller@tropia.test",
 	); err != nil {
 		return err
 	}
 	log.Println("  ✓ shop tropia-fresh-market")
 
-	// Backfill: give every shop still missing a logo a name-based default avatar
-	// (ui-avatars renders the initials), so shop videos/cards show an avatar
-	// instead of the bare person placeholder. This also covers shops created at
-	// runtime via become-seller before it set a default logo (e.g. "Shop của A").
+	// Cleanup: clear any stale ui-avatars.com default logos (NULL them out) so
+	// the client falls back to its local name-based initials avatar. Those URLs
+	// return a broken CORS header ('Access-Control-Allow-Origin: *, *') that
+	// blocks the image on Flutter Web, spamming the console with net::ERR_FAILED.
 	tag, err := pool.Exec(ctx, `
 		UPDATE shops
-		   SET logo_url = 'https://ui-avatars.com/api/?background=FF6B35&color=fff&size=256&name='
-		                  || replace(trim(name), ' ', '+')
-		 WHERE logo_url IS NULL OR logo_url = ''`)
+		   SET logo_url = NULL
+		 WHERE logo_url LIKE '%ui-avatars.com%'`)
 	if err != nil {
 		return err
 	}
 	if n := tag.RowsAffected(); n > 0 {
-		log.Printf("  ✓ backfilled logo_url for %d shop(s) without one", n)
+		log.Printf("  ✓ cleared stale ui-avatars logo_url for %d shop(s)", n)
 	}
 	return nil
 }
@@ -639,6 +641,47 @@ func seedLiveSession(ctx context.Context, pool *pgxpool.Pool) error {
 
 	log.Printf("  ✓ live session %s (channel=%s, %d snapshot products, %d coupons)",
 		sessID, channel, len(snapshots), len(coupons))
+	return nil
+}
+
+// ─── Live gift catalog ──────────────────────────────────────────────────────
+// The purchasable virtual gifts viewers send (tặng) to streamers during a
+// live. Originally seeded by migration 0010, but a full DB wipe truncates the
+// table, so we restore it here too — keeps `wipe + seed` a complete reset.
+
+type seedGift struct {
+	Code         string
+	Name         string
+	PointCost    int
+	DisplayValue int
+	SortOrder    int
+}
+
+var liveGifts = []seedGift{
+	{Code: "rose", Name: "Hoa hồng", PointCost: 10, DisplayValue: 10, SortOrder: 1},
+	{Code: "heart", Name: "Trái tim", PointCost: 50, DisplayValue: 50, SortOrder: 2},
+	{Code: "star", Name: "Ngôi sao", PointCost: 100, DisplayValue: 100, SortOrder: 3},
+	{Code: "rocket", Name: "Tên lửa", PointCost: 500, DisplayValue: 500, SortOrder: 4},
+	{Code: "crown", Name: "Vương miện", PointCost: 1000, DisplayValue: 1000, SortOrder: 5},
+}
+
+func seedLiveGiftCatalog(ctx context.Context, pool *pgxpool.Pool) error {
+	const q = `
+		INSERT INTO live_gift_catalog (code, name, point_cost, display_value, sort_order, is_active)
+		VALUES ($1, $2, $3, $4, $5, TRUE)
+		ON CONFLICT (code) DO UPDATE
+			SET name          = EXCLUDED.name,
+			    point_cost    = EXCLUDED.point_cost,
+			    display_value = EXCLUDED.display_value,
+			    sort_order    = EXCLUDED.sort_order,
+			    is_active     = TRUE
+	`
+	for _, g := range liveGifts {
+		if _, err := pool.Exec(ctx, q, g.Code, g.Name, g.PointCost, g.DisplayValue, g.SortOrder); err != nil {
+			return fmt.Errorf("gift %s: %w", g.Code, err)
+		}
+		log.Printf("  ✓ live gift %s (%s, %d pts)", g.Code, g.Name, g.PointCost)
+	}
 	return nil
 }
 

@@ -18,6 +18,7 @@ import 'package:tropia_mobile_app_android/live_app/features/product/screens/prod
 import 'package:tropia_mobile_app_android/live_app/features/user/screens/login_screen.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/data/video_repository.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/models/video_model.dart';
+import 'package:tropia_mobile_app_android/live_app/features/video/widgets/initials_avatar.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/widgets/video_add_to_cart_sheet.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/widgets/video_comment_sheet.dart';
 import 'package:tropia_mobile_app_android/live_app/features/video/widgets/video_player_item.dart';
@@ -28,6 +29,14 @@ class CreatorProfileScreen extends StatefulWidget {
   final String userId;
   final String displayName;
   final String? avatarUrl;
+
+  /// Shop gắn với video (nếu có) — cần cả id lẫn slug để nút theo dõi gọi đúng
+  /// endpoint /api/shops/:slug/follow, khớp ngữ nghĩa nút (+) ở feed.
+  final String? shopId;
+  final String? shopSlug;
+
+  /// Trạng thái theo dõi HIỆU LỰC khi mở (đã tính shop vs creator) — truyền
+  /// [VideoPost.isFollowed], không phải cờ creator thô.
   final bool following;
 
   const CreatorProfileScreen({
@@ -35,6 +44,8 @@ class CreatorProfileScreen extends StatefulWidget {
     required this.userId,
     required this.displayName,
     this.avatarUrl,
+    this.shopId,
+    this.shopSlug,
     this.following = false,
   });
 
@@ -49,6 +60,12 @@ class _CreatorProfileScreenState extends State<CreatorProfileScreen> {
   late bool _following = widget.following;
 
   bool get _isMe => AuthService.instance.currentUser?.id == widget.userId;
+
+  /// Có shop để theo dõi (cần cả id lẫn slug). Khi true, nút theo dõi tác động
+  /// lên SHOP; ngược lại fallback theo dõi CREATOR — y hệt nút (+) ở feed.
+  bool get _hasShop =>
+      (widget.shopId?.isNotEmpty ?? false) &&
+      (widget.shopSlug?.isNotEmpty ?? false);
 
   @override
   void initState() {
@@ -77,9 +94,16 @@ class _CreatorProfileScreenState extends State<CreatorProfileScreen> {
     final newVal = !_following;
     setState(() => _following = newVal);
     try {
-      final res = newVal
-          ? await _repo.follow(widget.userId)
-          : await _repo.unfollow(widget.userId);
+      final bool res;
+      if (_hasShop) {
+        res = newVal
+            ? await _repo.followShop(widget.shopSlug!)
+            : await _repo.unfollowShop(widget.shopSlug!);
+      } else {
+        res = newVal
+            ? await _repo.follow(widget.userId)
+            : await _repo.unfollow(widget.userId);
+      }
       if (mounted) setState(() => _following = res);
     } catch (_) {
       if (mounted) setState(() => _following = !newVal);
@@ -120,19 +144,10 @@ class _CreatorProfileScreenState extends State<CreatorProfileScreen> {
             padding: const EdgeInsets.all(AppSizes.md),
             child: Row(
               children: [
-                CircleAvatar(
+                InitialsAvatar(
+                  imageUrl: widget.avatarUrl,
+                  name: widget.displayName,
                   radius: 36,
-                  backgroundColor: AppColors.primaryContainer,
-                  backgroundImage: widget.avatarUrl != null
-                      ? CachedNetworkImageProvider(widget.avatarUrl!)
-                      : null,
-                  child: widget.avatarUrl == null
-                      ? const Icon(
-                          Icons.person,
-                          color: AppColors.primary,
-                          size: 36,
-                        )
-                      : null,
                 ),
                 const SizedBox(width: AppSizes.md),
                 Expanded(
@@ -394,7 +409,7 @@ class _CreatorFeedViewerState extends State<_CreatorFeedViewer> {
   Future<void> _share(int i) async {
     final v = _videos[i];
     await Share.share(
-      'Xem video của @${v.displayName} trên Tropia\n${v.playUrl}',
+      'Xem video của @${v.displayName} trên Tropia\n${v.shareUrl}',
     );
     _replace(i, _videos[i].copyWith(shareCount: _videos[i].shareCount + 1));
     await _repo.incShare(v.id);

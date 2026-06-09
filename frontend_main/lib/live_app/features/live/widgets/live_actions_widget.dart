@@ -21,10 +21,10 @@
 
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:tropia_mobile_app_android/live_app/core/constants/app_constants.dart';
 import 'package:tropia_mobile_app_android/live_app/features/live/models/live_stream_model.dart';
+import 'package:tropia_mobile_app_android/live_app/features/video/widgets/initials_avatar.dart';
 
 class LiveActionsWidget extends StatefulWidget {
   final LiveStream stream;
@@ -173,21 +173,10 @@ class _LiveActionsWidgetState extends State<LiveActionsWidget>
         clipBehavior: Clip.none,
         children: [
           // Avatar
-          CircleAvatar(
+          InitialsAvatar(
+            imageUrl: widget.stream.sellerAvatarUrl,
+            name: widget.stream.sellerName,
             radius: AppSizes.avatarMd / 2,
-            backgroundColor: Colors.white,
-            child: ClipOval(
-              child: CachedNetworkImage(
-                imageUrl: widget.stream.sellerAvatarUrl,
-                width: AppSizes.avatarMd,
-                height: AppSizes.avatarMd,
-                fit: BoxFit.cover,
-                errorWidget: (_, __, ___) => const Icon(
-                  Icons.person,
-                  color: AppColors.textSecondary,
-                ),
-              ),
-            ),
           ),
 
           // Follow / + button ở góc dưới

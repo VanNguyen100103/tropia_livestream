@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:tropia_mobile_app_android/live_app/core/constants/app_constants.dart';
 import 'package:tropia_mobile_app_android/live_app/features/live/models/live_stream_model.dart';
+import 'package:tropia_mobile_app_android/live_app/features/video/widgets/initials_avatar.dart';
 
 import 'hls_viewer_web_stub.dart'
     if (dart.library.js_interop) 'hls_viewer_web.dart';
@@ -175,19 +176,10 @@ class LiveCardWidget extends StatelessWidget {
             ),
           ),
           // Avatar
-          ClipOval(
-            child: CachedNetworkImage(
-              imageUrl: stream.sellerAvatarUrl,
-              width: avatarSize,
-              height: avatarSize,
-              fit: BoxFit.cover,
-              errorWidget: (_, __, ___) => Container(
-                width: avatarSize,
-                height: avatarSize,
-                color: AppColors.primaryContainer,
-                child: const Icon(Icons.storefront, color: AppColors.primary, size: 22),
-              ),
-            ),
+          InitialsAvatar(
+            imageUrl: stream.sellerAvatarUrl,
+            name: stream.sellerName,
+            radius: avatarSize / 2,
           ),
           // Badge LIVE dưới avatar
           if (isLive)

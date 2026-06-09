@@ -6,6 +6,7 @@ import 'package:tropia_mobile_app_android/live_app/core/utils/logger.dart';
 import 'package:tropia_mobile_app_android/live_app/features/live/models/live_stream_model.dart';
 import 'package:tropia_mobile_app_android/live_app/features/live/providers/live_provider.dart';
 import 'package:tropia_mobile_app_android/live_app/features/shop/screens/shop_detail_screen.dart';
+import 'package:tropia_mobile_app_android/live_app/features/video/widgets/initials_avatar.dart';
 
 const _tag = 'LiveShopBottomSheet';
 
@@ -173,14 +174,10 @@ class _LiveShopBottomSheet extends StatelessWidget {
           // Avatar — tap → ShopDetailScreen
           GestureDetector(
             onTap: () => _goToShop(context),
-            child: ClipOval(
-              child: Image.network(
-                s.sellerAvatarUrl,
-                width: AppSizes.avatarLg,
-                height: AppSizes.avatarLg,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => _avatarFallback(),
-              ),
+            child: InitialsAvatar(
+              imageUrl: s.sellerAvatarUrl,
+              name: s.sellerName,
+              radius: AppSizes.avatarLg / 2,
             ),
           ),
           const SizedBox(width: AppSizes.md),
@@ -356,25 +353,6 @@ class _LiveShopBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _avatarFallback() {
-    return Container(
-      width: AppSizes.avatarLg,
-      height: AppSizes.avatarLg,
-      color: AppColors.primaryContainer,
-      child: Center(
-        child: Text(
-          stream.sellerName.isNotEmpty
-              ? stream.sellerName[0].toUpperCase()
-              : 'S',
-          style: const TextStyle(
-            color: AppColors.primary,
-            fontSize: AppSizes.fontXl,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

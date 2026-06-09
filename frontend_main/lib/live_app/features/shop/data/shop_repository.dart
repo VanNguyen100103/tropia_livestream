@@ -107,6 +107,9 @@ class ShopRepository {
 
   /// Lấy toàn bộ shop IDs mà user đang follow (dùng để enrich danh sách live)
   Future<Set<String>> getFollowedShopIds() async {
+    // Khách chưa đăng nhập thì không có gì để follow — gọi /me/following lúc
+    // này chỉ tốn 1 request và sinh 401 đỏ trong console. Trả set rỗng luôn.
+    if (!AuthService.instance.isSignedIn) return {};
     try {
       final res = await _dio.get('/api/shops/me/following',
           queryParameters: {'offset': 0, 'limit': 200});

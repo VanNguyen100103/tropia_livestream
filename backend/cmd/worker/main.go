@@ -657,6 +657,19 @@ func handleVideoOverlay(r2 *storage.R2, repo *video.Repository, log *slog.Logger
 			return fmt.Errorf("download raw clip: %w", err)
 		}
 
+		// 1b. Probe the clip's real display dimensions so the overlay PNG is
+		// rendered at the clip's true aspect. Clients — especially Flutter web,
+		// which can't read a file:// preview — POST width=height=0, which would
+		// default the overlay to 1080×1920 and let scale2ref stretch it onto a
+		// clip with a different aspect ratio. ffprobe is authoritative; on
+		// failure we keep whatever the client reported.
+		if w, h, perr := vod.ProbeVideoSize(ctx, srcPath); perr == nil {
+			v.Width, v.Height = w, h
+		} else {
+			log.Warn("video overlay: ffprobe failed; using client dims",
+				"video_id", ev.VideoID, "client_w", v.Width, "client_h", v.Height, "err", perr)
+		}
+
 		// 2. Render the static overlay PNG from the clip's metadata.
 		pngPath := filepath.Join(workDir, "overlay.png")
 		if err := vod.RenderFeedOverlay(ctx, buildFeedOverlayInput(v), pngPath); err != nil {
@@ -714,28 +727,47 @@ func buildFeedOverlayInput(v *video.Video) vod.FeedOverlayInput {
 		if p.SalePrice != nil {
 			price = float64(*p.SalePrice)
 		}
+		// Active flash sale → use the flash price + flag the card (mirrors the
+		// feed's displayPrice priority: flash > sale > base).
+		flash := p.FlashPrice != nil && p.FlashEndsAt != nil && p.FlashEndsAt.After(time.Now())
+		if flash {
+			price = float64(*p.FlashPrice)
+		}
 		img := ""
 		if p.ImageURL != nil {
 			img = *p.ImageURL
 		}
-		products = append(products, vod.Product{Name: p.Name, SalePrice: price, ImageURL: img})
+		products = append(products, vod.Product{Name: p.Name, SalePrice: price, ImageURL: img, Flash: flash})
 	}
 	labels := make([]string, 0, len(v.Coupons))
 	for _, c := range v.Coupons {
 		if c.DiscountType == "percent" {
 			labels = append(labels, fmt.Sprintf("Giảm %.0f%%", c.DiscountValue))
 		} else {
-			labels = append(labels, fmt.Sprintf("Giảm %.0fđ", c.DiscountValue))
+			labels = append(labels, "Giảm "+vod.FormatVND(c.DiscountValue))
 		}
 	}
+	// Avatar for the rail head: prefer the shop logo, fall back to the creator's.
+	avatar := ""
+	switch {
+	case v.ShopAvatar != nil && *v.ShopAvatar != "":
+		avatar = *v.ShopAvatar
+	case v.UserAvatar != nil && *v.UserAvatar != "":
+		avatar = *v.UserAvatar
+	}
 	return vod.FeedOverlayInput{
-		Width:        v.Width,
-		Height:       v.Height,
-		Handle:       handle,
-		Caption:      caption,
-		Hashtags:     v.Hashtags,
-		Products:     products,
-		CouponLabels: labels,
+		Width:          v.Width,
+		Height:         v.Height,
+		Handle:         handle,
+		Caption:        caption,
+		Hashtags:       v.Hashtags,
+		Products:       products,
+		CouponLabels:   labels,
+		AvatarURL:      avatar,
+		LikeCount:      v.LikeCount,
+		CommentCount:   v.CommentCount,
+		ShareCount:     v.ShareCount,
+		ShopHasVoucher: v.ShopHasVoucher,
 	}
 }
 
